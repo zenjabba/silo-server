@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 
@@ -83,12 +84,24 @@ func TestResolveRefusesAfterAForceReloadRevokesTheNode(t *testing.T) {
 		hls.TranscodeNodeURL = nodeURL
 		hls.RoutingExecutionNodeID = nodeID
 		put(t, hls.TranscodeTransportID, hls)
+		hlsToken := signClaims(t, hls.ToClaims(), resolveSecret)
+		// API clocks can run ahead of Redis. A signed token with a future
+		// iat still predates the revocation that follows in this test.
+		ahead := hls.ToClaims()
+		ahead.IssuedAt = jwt.NewNumericDate(time.Now().Add(time.Minute))
+		ahead.ExpiresAt = jwt.NewNumericDate(time.Now().Add(time.Hour))
+		aheadToken, err := jwt.NewWithClaims(jwt.SigningMethodHS256, ahead).SignedString([]byte(resolveSecret))
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeRemux, remux.TranscodeTransportID, remuxToken); status != http.StatusOK {
 			t.Fatalf("remux before the revocation = %d %q", status, reason)
 		}
-		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, ""); status != http.StatusOK {
-			t.Fatalf("HLS before the revocation = %d %q", status, reason)
+		for _, token := range []string{"", hlsToken, aheadToken} {
+			if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, token); status != http.StatusOK {
+				t.Fatalf("HLS before the revocation = %d %q", status, reason)
+			}
 		}
 		if err := store.RevokeNodeID(context.Background(), nodeID); err != nil {
 			t.Fatal(err)
@@ -96,8 +109,23 @@ func TestResolveRefusesAfterAForceReloadRevokesTheNode(t *testing.T) {
 		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeRemux, remux.TranscodeTransportID, remuxToken); status != http.StatusGone || reason != nodecontrol.ResolveStopped {
 			t.Fatalf("remux after the revocation = %d %q, want 410 %q", status, reason, nodecontrol.ResolveStopped)
 		}
-		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, ""); status != http.StatusNotFound || reason != nodecontrol.ResolveNotFound {
-			t.Fatalf("HLS after the revocation = %d %q, want 404 %q", status, reason, nodecontrol.ResolveNotFound)
+		for _, token := range []string{"", hlsToken, aheadToken} {
+			if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, token); status != http.StatusNotFound || reason != nodecontrol.ResolveNotFound {
+				t.Fatalf("HLS after the revocation = %d %q, want 404 %q", status, reason, nodecontrol.ResolveNotFound)
+			}
+		}
+		// Revocation must still hold after the recipe itself disappears.
+		if err := store.Delete(t.Context(), hls.TranscodeTransportID); err != nil {
+			t.Fatal(err)
+		}
+		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, hlsToken); status != http.StatusNotFound {
+			t.Fatalf("HLS after recipe deletion = %d %q, want 404", status, reason)
+		}
+		// A new durable start stamps the current generation and can rebuild,
+		// even with a token minted in the same second as the reload.
+		put(t, hls.TranscodeTransportID, hls)
+		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, hlsToken); status != http.StatusOK {
+			t.Fatalf("new HLS after reload = %d %q, want 200", status, reason)
 		}
 	})
 	// A transcode moved to this node keeps presenting the token minted for
@@ -128,15 +156,33 @@ func TestResolveRefusesAfterAForceReloadRevokesTheNode(t *testing.T) {
 		hls := nativeCard("viewer-url-"+unique, "hls-url-"+unique)
 		hls.TranscodeNodeURL = nodeURL
 		put(t, hls.TranscodeTransportID, hls)
+		hlsToken := signClaims(t, hls.ToClaims(), resolveSecret)
 
-		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, ""); status != http.StatusOK {
-			t.Fatalf("HLS before the revocation = %d %q", status, reason)
+		for _, token := range []string{"", hlsToken} {
+			if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, token); status != http.StatusOK {
+				t.Fatalf("HLS before the revocation = %d %q", status, reason)
+			}
 		}
 		if err := store.RevokeNode(context.Background(), nodeURL); err != nil {
 			t.Fatal(err)
 		}
-		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, ""); status != http.StatusNotFound || reason != nodecontrol.ResolveNotFound {
-			t.Fatalf("HLS after the revocation = %d %q, want 404 %q", status, reason, nodecontrol.ResolveNotFound)
+		for _, token := range []string{"", hlsToken} {
+			if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, token); status != http.StatusNotFound || reason != nodecontrol.ResolveNotFound {
+				t.Fatalf("HLS after the revocation = %d %q, want 404 %q", status, reason, nodecontrol.ResolveNotFound)
+			}
+		}
+		// Revocation must still hold after the recipe itself disappears.
+		if err := store.Delete(t.Context(), hls.TranscodeTransportID); err != nil {
+			t.Fatal(err)
+		}
+		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, hlsToken); status != http.StatusNotFound {
+			t.Fatalf("HLS after recipe deletion = %d %q, want 404", status, reason)
+		}
+		// A new durable start stamps the current generation and can rebuild,
+		// even with a token minted in the same second as the reload.
+		put(t, hls.TranscodeTransportID, hls)
+		if status, reason := resolve(t, client, nodecontrol.ResolvePurposeHLS, hls.TranscodeTransportID, hlsToken); status != http.StatusOK {
+			t.Fatalf("new HLS after reload = %d %q, want 200", status, reason)
 		}
 	})
 }

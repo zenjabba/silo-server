@@ -225,11 +225,12 @@ type PlaybackHandler struct {
 	// that negotiated authorized_media_origins_v1 simply stays on the API origin.
 	ProxyGrantStore recipeCardStoreV3
 	// NodeRecipeStore hands a transcode node the recipe it rebuilds a
-	// header-authenticated remote transcode from after its own restart, keyed by
+	// remote transcode from after its own restart, keyed by
 	// the transport id the node serves it under. It is also the active authority
 	// for transcode-executed progressive remuxes, whose signed tokens otherwise
 	// outlive a node's in-memory stop fence. Without a usable store those remuxes
-	// use another legal route; tokenless HLS sessions replan instead of recovering.
+	// use another legal route; tokenless HLS sessions and sessions on a force-reloaded
+	// node replan instead of recovering.
 	NodeRecipeStore    recipeCardStoreV3
 	ItemAccess         PlaybackItemAccessChecker // optional; enables file authorization checks
 	EpisodeLookup      PlaybackEpisodeLookup     // optional; resolves episode files to their series

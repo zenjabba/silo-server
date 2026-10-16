@@ -2797,6 +2797,10 @@ type stubRecipeStore struct {
 	getHit chan struct{}
 }
 
+func (s *stubRecipeStore) TokenFallbackAllowed(context.Context, playback.RecipeCard) (bool, error) {
+	return true, nil
+}
+
 func (s *stubRecipeStore) Lookup(context.Context, string) (*playback.RecipeCard, bool, error) {
 	s.mu.Lock()
 	s.hits++

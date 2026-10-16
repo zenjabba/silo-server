@@ -26,7 +26,8 @@ type recipeMap struct {
 	mu    sync.Mutex
 	cards map[string]playback.RecipeCard
 	// err is a store that cannot be read.
-	err error
+	err      error
+	tokenErr error
 }
 
 func (m *recipeMap) Lookup(_ context.Context, transportID string) (*playback.RecipeCard, bool, error) {
@@ -40,6 +41,10 @@ func (m *recipeMap) Lookup(_ context.Context, transportID string) (*playback.Rec
 		return nil, false, nil
 	}
 	return &card, true, nil
+}
+
+func (m *recipeMap) TokenFallbackAllowed(_ context.Context, _ playback.RecipeCard) (bool, error) {
+	return m.tokenErr == nil, m.tokenErr
 }
 
 // denySet is a deny marker store.
@@ -544,4 +549,12 @@ func TestResolveReadsTheNodeFromTheRegistryDuringADatabaseOutage(t *testing.T) {
 	if _, status, _ := missed.resolve(t, nodecontrol.ResolvePurposeHLS, "url-bound", ""); status != http.StatusServiceUnavailable {
 		t.Fatalf("resolve without the registry = %d, want the table read's 503", status)
 	}
+}
+
+func TestResolveHLSTokenAuthorityUnavailable(t *testing.T) {
+	f := newResolveFixture(t, 3)
+	f.recipes.tokenErr = errors.New("revocation store unavailable")
+	card := nativeCard("viewer-authority", "transport-authority")
+	_, status, reason := f.resolve(t, nodecontrol.ResolvePurposeHLS, card.TranscodeTransportID, signClaims(t, card.ToClaims(), resolveSecret))
+	wantRefusal(t, status, reason, http.StatusServiceUnavailable, "")
 }

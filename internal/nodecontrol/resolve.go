@@ -23,6 +23,9 @@ import (
 // giving up on a session that still exists. *noderecipe.Store implements it.
 type RecipeSource interface {
 	Lookup(ctx context.Context, transportID string) (*playback.RecipeCard, bool, error)
+	// TokenFallbackAllowed checks node revocation even when the stored recipe
+	// is missing or expired. A complete token cannot replace revoked authority.
+	TokenFallbackAllowed(ctx context.Context, card playback.RecipeCard) (bool, error)
 }
 
 // DenySource reports a playback session's deny marker. *playback.StreamDeny
@@ -194,6 +197,16 @@ func (s *Server) resolveHLS(ctx context.Context, nodeID int, req ResolveRequest)
 			slog.WarnContext(ctx, "resolve: recipe bound to another node", "component", "nodecontrol", "node_id", nodeID, "session", transportID)
 		}
 		return nil, refusal
+	}
+	if stored == nil && s.opts.Recipes != nil {
+		active, err := s.opts.Recipes.TokenFallbackAllowed(ctx, card)
+		if err != nil {
+			slog.WarnContext(ctx, "resolve: cannot read token recipe authority", "component", "nodecontrol", "session", transportID, "error", err)
+			return nil, refuseUnavailable
+		}
+		if !active {
+			return nil, refuseNotFound
+		}
 	}
 	resolution := newResolution(card, transportID)
 	startedAt, source := sessionStart(card, claims)

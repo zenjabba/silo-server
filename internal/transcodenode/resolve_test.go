@@ -97,6 +97,16 @@ func (c *testCore) Lookup(ctx context.Context, transportID string) (*playback.Re
 	return recipes.Lookup(ctx, transportID)
 }
 
+func (c *testCore) TokenFallbackAllowed(ctx context.Context, card playback.RecipeCard) (bool, error) {
+	c.mu.Lock()
+	recipes := c.recipes
+	c.mu.Unlock()
+	if recipes == nil {
+		return true, nil
+	}
+	return recipes.TokenFallbackAllowed(ctx, card)
+}
+
 func (c *testCore) Denied(ctx context.Context, sessionID string) bool {
 	c.mu.Lock()
 	deny := c.deny

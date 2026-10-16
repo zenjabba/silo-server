@@ -362,6 +362,13 @@ The node no longer writes the recipe store, and it reports no terminal events.
 - **Idle reap** is unchanged: the node closes the runtime of a session idle for
   ten minutes and the recipe stays, because an idle reap is not a stop.
 
+A complete stream-token fallback also checks the node's revocation generation,
+even if its recipe has expired or been deleted. Once a node has been force
+reloaded, reconstruction requires a stored recipe stamped with the current
+generation; a token alone cannot establish that it was issued after the reload.
+New starts still write those recipes. A failure to read revocation state answers
+`503`.
+
 Force reload revokes cards bound to the node's id and those bound to its
 current URL. A card bound by URL alone to a URL the row no longer has is not
 revoked. See also [the URL normalization note](#recipe-authority-url-normalization).
@@ -534,7 +541,10 @@ own storage.
    one that failed on the source's bytes (FFmpeg or ffprobe failed on it, or
    their output failed its checks) answers `422`, one that failed for the
    core's own reasons (its disk, a process that cannot start, the build
-   timeout) `503`.
+   timeout) `503`. Write, sync and publish failures receive the same backoff
+   before the build releases its reservation. Each replica retains at most
+   1,024 failed builds, pruning expired failures on every insertion and
+   evicting the oldest when full.
 
 The bundle is a tar of `selected.ass`, the track extracted with `-copyts` so
 its events keep the container timestamps the transcode's frames carry (text
@@ -695,8 +705,11 @@ source keeps the symlink alias it always used. `escapeFilterPath` escapes
 - **Preparing sessions.** A start registers the session as preparing and
   returns; FFmpeg launches once the bundle is unpacked. Meanwhile segment
   requests wait up to 12 seconds and `init.mp4` up to 10 seconds, then answer
-  `404`, and the player retries. A `RequireReady` start waits for the bundle
-  within its request's own deadline, then gives FFmpeg the whole manifest wait.
+  `404`, and the player retries. After a seek restart, a request before the
+  pending generation's start segment uses segment recovery immediately; that
+  generation cannot produce the earlier segment. A `RequireReady` start waits
+  for the bundle within its request's own deadline, then gives FFmpeg the whole
+  manifest wait.
   A same-ID start retires the live session only once its replacement's bundle
   is staged, so a failed staging leaves the live session running. The
   Jellyfin-compatible dispatcher sets `RequireReady` on every text burn-in, as

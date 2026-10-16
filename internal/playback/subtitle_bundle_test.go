@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -282,5 +284,158 @@ func TestOpenSubtitleBundleTellsTheCoresFailuresApart(t *testing.T) {
 	_, err := cache.OpenSubtitleBundle(t.Context(), src)
 	if err == nil || errors.Is(err, ErrSubtitleBundleFailed) || errors.Is(err, ErrSubtitleBundlePending) {
 		t.Fatalf("open with an FFmpeg that cannot start = %v", err)
+	}
+}
+
+func TestSubtitleBundleFailureCacheBoundsDistinctKeys(t *testing.T) {
+	for _, expired := range []bool{true, false} {
+		t.Run(fmt.Sprintf("expired=%v", expired), func(t *testing.T) {
+			dir := t.TempDir()
+			cache := NewSubtitleCache(func() string { return dir })
+			at := time.Now().Add(-time.Second)
+			if expired {
+				at = at.Add(-subtitleBundleFailureTTL)
+			}
+			const capacity = 1024
+			for i := range capacity {
+				cache.bundleFailures[fmt.Sprint(i)] = subtitleBundleFailure{err: errors.New("old failure"), at: at.Add(time.Duration(i))}
+			}
+			ffmpeg, _ := fakeExtractFFmpeg(t, 1)
+			src := SubtitleBundleSource{Path: writeSource(t), Track: 999, Codec: "ass", FFmpegPath: ffmpeg}
+			if _, err := cache.OpenSubtitleBundle(t.Context(), src); !errors.Is(err, ErrSubtitleBundleFailed) {
+				t.Fatalf("build = %v", err)
+			}
+			cache.mu.Lock()
+			defer cache.mu.Unlock()
+			if expired && len(cache.bundleFailures) != 1 {
+				t.Errorf("expired failures retained: %d entries", len(cache.bundleFailures))
+			}
+			if len(cache.bundleFailures) > capacity {
+				t.Errorf("failure cache grew to %d entries", len(cache.bundleFailures))
+			}
+			if _, ok := cache.bundleFailures["0"]; ok {
+				t.Error("oldest failure retained")
+			}
+		})
+	}
+}
+
+func TestSubtitleBundleCommitFailureBacksOff(t *testing.T) {
+	dir := t.TempDir()
+	cache := NewSubtitleCache(func() string { return dir })
+	ffmpeg, runs := fakeExtractFFmpeg(t, 0)
+	src := SubtitleBundleSource{Path: writeSource(t), Track: 0, Codec: "ass", FFmpegPath: ffmpeg}
+	fill := cache.beginFill(src.Path, src.Track, subtitleBundleFormat(src.Codec))
+	if fill == nil {
+		t.Fatal("no fill")
+	}
+	final := filepath.Join(cache.dir(), fill.key)
+	if err := os.Mkdir(final, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(final, "block-rename"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache.warmSem <- struct{}{}
+	cache.buildBundle(src, fill)
+	if err := os.RemoveAll(final); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		f, err := cache.OpenSubtitleBundle(t.Context(), src)
+		if f != nil {
+			_ = f.Close()
+		}
+		if err == nil || errors.Is(err, ErrSubtitleBundleFailed) {
+			t.Errorf("open after publish failure = %v, want transient failure", err)
+		}
+	}
+	if n := countExtractRuns(t, runs); n != 1 {
+		t.Errorf("%d demuxes after publish failure, want 1", n)
+	}
+}
+
+func TestSubtitleBundleOutputFailureIsRetryable(t *testing.T) {
+	full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+	if err != nil {
+		t.Skip("requires /dev/full")
+	}
+	defer func() { _ = full.Close() }()
+	ffmpeg, _ := fakeExtractFFmpeg(t, 0)
+	err = boundedRun(t.Context(), ffmpeg, nil, full, maxBundleScriptBytes)
+	if !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("extract error = %v, want ENOSPC", err)
+	}
+	err = subtitleBundleSourceError(t.Context(), fmt.Errorf("extract track: %w", err))
+	if errors.Is(err, ErrSubtitleBundleFailed) || !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("scratch write failure = %v, want retryable ENOSPC", err)
+	}
+}
+
+// A requester may pass OpenSubtitleBundle's failure lookup before the build
+// records its failure, then acquire the released reservation afterward.
+func TestSubtitleBundleReservationRechecksFailure(t *testing.T) {
+	dir := t.TempDir()
+	cache := NewSubtitleCache(func() string { return dir })
+	ffmpeg, runs := fakeExtractFFmpeg(t, 0)
+	src := SubtitleBundleSource{Path: writeSource(t), Codec: "ass", FFmpegPath: ffmpeg}
+	info, err := os.Stat(src.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	format := subtitleBundleFormat(src.Codec)
+	key := subtitleCacheFormatKey(src.Path, src.Track, info.ModTime(), info.Size(), format)
+	failed := errors.New("previous build could not publish")
+	cache.rememberBundleFailure(key, failed)
+	done, err := cache.startBundleBuild(src, format, key)
+	if done != nil {
+		<-done
+	}
+	if !errors.Is(err, failed) {
+		t.Errorf("stale requester = %v, want remembered failure", err)
+	}
+	if n := countExtractRuns(t, runs); n != 0 {
+		t.Errorf("stale requester demuxed %d times", n)
+	}
+}
+
+func TestSubtitleBundleReservationUsesCurrentRevision(t *testing.T) {
+	dir := t.TempDir()
+	cache := NewSubtitleCache(func() string { return dir })
+	ffmpeg, runs := fakeExtractFFmpeg(t, 0)
+	src := SubtitleBundleSource{Path: writeSource(t), Codec: "ass", FFmpegPath: ffmpeg}
+	info, err := os.Stat(src.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	format := subtitleBundleFormat(src.Codec)
+	earlierKey := subtitleCacheFormatKey(src.Path, src.Track, info.ModTime(), info.Size(), format)
+	if err := os.WriteFile(src.Path, []byte("new source revision"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(src.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := subtitleCacheFormatKey(src.Path, src.Track, info.ModTime(), info.Size(), format)
+	if key == earlierKey {
+		t.Fatal("source revision did not change")
+	}
+	failed := errors.New("current revision's previous build failed")
+	cache.rememberBundleFailure(key, failed)
+	done, err := cache.startBundleBuild(src, format, earlierKey)
+	if done != nil {
+		<-done
+	}
+	waitFor(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return len(cache.inflight) == 0
+	})
+	if !errors.Is(err, failed) {
+		t.Errorf("stale revision lookup = %v, want remembered failure", err)
+	}
+	if n := countExtractRuns(t, runs); n != 0 {
+		t.Errorf("current revision demuxed %d times", n)
 	}
 }

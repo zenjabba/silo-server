@@ -3015,7 +3015,7 @@ func (s *TranscodeSession) SegmentRecoveryDecision(segNum int, now time.Time) Se
 		decision.WaitTimeout = activeSegmentWait
 		decision.RestartOnTimeout = false
 		decision.Reason = segmentReasonRestarting
-	case progress.Preparing:
+	case progress.Preparing && segNum >= progress.StartSegmentNumber:
 		// FFmpeg starts once the subtitle is staged; a restart now would
 		// only wait for the same staging. The request waits activeSegmentWait
 		// (12 s) and then answers 404, as for a slow FFmpeg start; the

@@ -408,6 +408,9 @@ func TestPreparingSessionLaunchesOnceStaged(t *testing.T) {
 	if !session.SegmentProgress(time.Now()).Preparing || len(ffmpegRuns(t, runs)) != 0 {
 		t.Fatal("a restart while preparing started FFmpeg without its subtitle")
 	}
+	if decision := session.SegmentRecoveryDecision(0, time.Now()); decision.Wait || !decision.RestartOnTimeout || decision.Reason != "before_start_segment" {
+		t.Fatalf("earlier segment while preparing = %+v", decision)
+	}
 	close(core.release)
 	waitFor(t, func() bool { return len(ffmpegRuns(t, runs)) == 1 && !session.SegmentProgress(time.Now()).Preparing })
 	args := ffmpegRuns(t, runs)[0]

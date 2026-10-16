@@ -726,6 +726,10 @@ func TestRelayMoveEndsOnSourceToneMapRefusal(t *testing.T) {
 // reads Redis.
 type rehomeRecipeLookup struct{ store *sharedRecipeStore }
 
+func (l rehomeRecipeLookup) TokenFallbackAllowed(context.Context, playback.RecipeCard) (bool, error) {
+	return true, nil
+}
+
 func (l rehomeRecipeLookup) Lookup(ctx context.Context, transportID string) (*playback.RecipeCard, bool, error) {
 	card, ok := l.store.Get(ctx, transportID)
 	return card, ok, nil

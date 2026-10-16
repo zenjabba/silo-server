@@ -3075,11 +3075,9 @@ func (h *PlaybackHandler) deleteProxyGrantV3(ctx context.Context, sessionID stri
 // after a restart, keyed by the transport id the node serves it under (which is
 // the id in every relayed node URL, not the playback session id).
 //
-// It exists because a header-authenticated attempt publishes no stream token, so
-// neither the client nor this server's relay has a recipe to forward when the
-// node comes back empty — the node would 404 until the client replanned. A node
-// dying mid-stream is a normal event, so tokenless playback recovers from it the
-// way a legacy token attempt already does.
+// Header-authenticated attempts carry no token recipe. Token-bearing attempts
+// also need a current stored generation after force reload, so every remote
+// HLS start records its accepted recipe.
 //
 // Best effort, exactly like the jellycompat handoff: the write is bounded and a
 // failure only forfeits restart resilience for this session, never the start.
@@ -4202,14 +4200,10 @@ func (h *PlaybackHandler) prepareRemoteTransportV3(r *http.Request, session *pla
 	case mode.proxyEgress:
 		url, servedByProxy, priorGrant = h.grantManifestURLV3(r.Context(), card, nodePlan.ProxyNode, accessPath)
 	}
-	if mode.headerAuth {
-		// No client-visible URL carries a stream token in this mode, so neither the
-		// client nor the API relay can hand the node its recipe back after the node
-		// restarts. Store it for the node to fetch. Both sub-modes need it: the
-		// API-local relay is the fallback whenever a proxy origin is not used, and
-		// the proxy relays the same tokenless node URLs when it is.
-		h.putNodeRecipeV3(r.Context(), transportID, card)
-	}
+	// Tokenless sessions always need a stored recipe. Token-bearing sessions
+	// need it after force reload too: a token cannot prove it belongs to the
+	// node's current authority generation.
+	h.putNodeRecipeV3(r.Context(), transportID, card)
 	if nodePlan.ProxyNode != nil && !servedByProxy {
 		// The planner charged a proxy for a stream that will not cross it (no
 		// writable grant, or a legacy no-token fallback). Give back the proxy half

@@ -6,16 +6,24 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/Silo-Server/silo-server/internal/config"
+	"github.com/Silo-Server/silo-server/internal/nodecontrol"
+	"github.com/Silo-Server/silo-server/internal/nodecontrol/nodecontroltest"
 	"github.com/Silo-Server/silo-server/internal/nodepool"
+	"github.com/Silo-Server/silo-server/internal/noderecipe"
 	"github.com/Silo-Server/silo-server/internal/noderouting"
 	"github.com/Silo-Server/silo-server/internal/playback"
+	"github.com/Silo-Server/silo-server/internal/streamtoken"
 	"github.com/Silo-Server/silo-server/internal/transcodenode"
 )
 
@@ -518,10 +526,9 @@ func TestPrepareRemoteRemuxRequiredRollbackFailsWhenTheRecipeSurvives(t *testing
 	unlock()
 }
 
-// A legacy attempt carries its whole recipe in the client's stream token, which
-// the relay forwards to the node. It needs no stored copy, and writing one would
-// put a media path in Redis for no reason.
-func TestPrepareTransportV3LegacyAttemptStoresNoNodeRecipe(t *testing.T) {
+// Token-bearing attempts also need stored authority: after force reload a
+// token alone cannot prove that the core authorized a new transport.
+func TestPrepareTransportV3LegacyAttemptStoresNodeRecipe(t *testing.T) {
 	node := remoteTranscodeNodeStubV3(t)
 	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
 	handler.NodeKeys = testNodeKeys
@@ -541,8 +548,8 @@ func TestPrepareTransportV3LegacyAttemptStoresNoNodeRecipe(t *testing.T) {
 	}
 	defer transport.rollback()
 
-	if len(recipes.cards) != 0 {
-		t.Fatalf("recipes stored = %v, want none for a token-carrying attempt", recipes.cards)
+	if card, ok := recipes.cards[transport.transportID]; !ok || card.TranscodeNodeURL != node.URL {
+		t.Fatalf("recipes stored = %v, want the token-carrying transport's recipe", recipes.cards)
 	}
 }
 
@@ -980,5 +987,56 @@ func TestPrepareTransportV3KeepsTheProxyReservationWhenTheProxyServes(t *testing
 	}
 	if len(planner.releasedProxy) != 0 {
 		t.Fatalf("proxy-half releases = %v, want none: the proxy is serving this stream", planner.releasedProxy)
+	}
+}
+
+func TestPrepareTransportV3TokenAttemptRebuildsAfterForceReload(t *testing.T) {
+	raw := os.Getenv("SILO_TEST_REDIS_URL")
+	if raw == "" {
+		t.Skip("SILO_TEST_REDIS_URL not set")
+	}
+	opts, err := redis.ParseURL(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := redis.NewClient(opts)
+	t.Cleanup(func() { _ = client.Close() })
+	store := noderecipe.NewStore(client, time.Minute)
+	node := remoteTranscodeNodeStubV3(t)
+	if err := store.RevokeNode(t.Context(), node.URL); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewPlaybackHandler(playback.NewSessionManager(0, 0))
+	handler.NodeKeys = testNodeKeys
+	handler.JWTSecret = "test-secret"
+	handler.NodeRecipeStore = store
+	session := &playback.Session{ID: "post-reload-" + strconv.FormatInt(time.Now().UnixNano(), 10), UserID: 7, ProfileID: "profile-1"}
+	transport, failure := handler.prepareRemoteTransportV3(httptest.NewRequest(http.MethodPost, "/", nil), session,
+		v3HandlerFixtureFile(t), remoteHLSResultV3(), nodepool.Plan{TranscodeNode: &nodepool.Node{URL: node.URL}},
+		preparedTimelineV3{}, mediaAuthModeV3{})
+	if failure != nil {
+		t.Fatalf("prepare = %v", failure)
+	}
+	defer transport.rollback()
+	card, ok := store.Get(t.Context(), transport.transportID)
+	if !ok {
+		t.Fatal("post-reload token-bearing start stored no recipe")
+	}
+	token, err := streamtoken.Sign(card.ToClaims(), handler.JWTSecret, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	core := nodecontroltest.Resolver(t, 1, nodecontrol.Options{
+		Nodes: rehomeNodeDirectory{1: node.URL}, Recipes: store, StreamSecret: func() string { return handler.JWTSecret },
+	})
+	req := nodecontrol.ResolveRequest{TransportID: transport.transportID, Purpose: nodecontrol.ResolvePurposeHLS, StreamToken: token}
+	if _, err := core.Resolve(t.Context(), req); err != nil {
+		t.Fatalf("rebuild new post-reload session = %v", err)
+	}
+	if err := store.Delete(t.Context(), transport.transportID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := core.Resolve(t.Context(), req); nodecontrol.Status(err) != http.StatusNotFound {
+		t.Fatalf("token without current stored authority = %v, want 404", err)
 	}
 }

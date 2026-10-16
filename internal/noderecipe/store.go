@@ -17,9 +17,10 @@
 // remuxes also use the record as durable active authority: central writes it
 // before publishing the route, the node checks it before each remux response,
 // and deliberate teardown deletes it so a surviving token cannot restart work.
-// A native transcode moved off an unreachable node gets a record too: its
-// token still names the node it left, and the record names the node it runs
-// on now.
+// Native transcodes also store their accepted recipe: after force reload,
+// reconstruction needs a record stamped with the current node generation.
+// A transcode moved off an unreachable node keeps a token naming the node it
+// left; the record instead names the node it runs on now.
 // Each node record is stamped with a per-node authority generation; destructive
 // force reload advances that generation so even a published remux URL which has
 // not received its first request is revoked without enumerating recipe keys.
@@ -322,6 +323,27 @@ func (s *Store) Lookup(ctx context.Context, sessionID string) (*playback.RecipeC
 		}
 	}
 	return &card, true, nil
+}
+
+// TokenFallbackAllowed checks whether a missing recipe may be replaced by
+// a complete token. After a node has been force-reloaded, only a stored recipe
+// stamped with its current generation can authorize reconstruction. A token's
+// issue time cannot establish that order: it comes from an API process clock,
+// while revocation uses Redis time. The generation outlives individual records
+// so deleting or expiring a recipe cannot restore pre-reload authority.
+func (s *Store) TokenFallbackAllowed(ctx context.Context, card playback.RecipeCard) (bool, error) {
+	if s == nil || s.rdb == nil || s.prefix != KeyPrefix {
+		return true, nil
+	}
+	authorityKey := nodeAuthorityGenerationKeyForCard(card)
+	if authorityKey == "" {
+		return false, nil
+	}
+	generation, err := s.currentNodeAuthorityGeneration(ctx, authorityKey)
+	if err != nil {
+		return false, fmt.Errorf("load token recipe authority generation: %w", err)
+	}
+	return generation == 0, nil
 }
 
 // errMalformedRecord is a stored recipe record whose authority stamp cannot

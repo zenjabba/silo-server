@@ -57,6 +57,8 @@ const (
 	// requests for its bundle with its failure, so a node polling for it does
 	// not start the whole-source demux again at once.
 	subtitleBundleFailureTTL = time.Minute
+	// maxSubtitleBundleFailures bounds memory even for distinct invalid tracks.
+	maxSubtitleBundleFailures = 1024
 	// subtitleBundleBuildTimeout bounds one build, a demux of the whole
 	// source from the core's storage, as a background warm is bounded.
 	subtitleBundleBuildTimeout = subtitleCacheWarmTimeout
@@ -195,12 +197,35 @@ func (c *SubtitleCache) bundleFailure(key string) error {
 	return failure.err
 }
 
+// rememberBundleFailure prunes expired entries on every failed build, even
+// when their keys are never requested again, and evicts the oldest at capacity.
+func (c *SubtitleCache) rememberBundleFailure(key string, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	oldestKey := ""
+	var oldest time.Time
+	for key, failure := range c.bundleFailures {
+		if now.Sub(failure.at) >= subtitleBundleFailureTTL {
+			delete(c.bundleFailures, key)
+			continue
+		}
+		if oldest.IsZero() || failure.at.Before(oldest) {
+			oldestKey, oldest = key, failure.at
+		}
+	}
+	if _, exists := c.bundleFailures[key]; !exists && len(c.bundleFailures) >= maxSubtitleBundleFailures {
+		delete(c.bundleFailures, oldestKey)
+	}
+	c.bundleFailures[key] = subtitleBundleFailure{err: err, at: now}
+}
+
 // startBundleBuild begins building src's bundle under key unless a build of
 // it is in flight, and returns the channel that closes when that build ends;
 // nil when every warm slot was busy and no build of it is in flight. It fails
 // when the cache cannot take a build.
 func (c *SubtitleCache) startBundleBuild(src SubtitleBundleSource, format, key string) (<-chan struct{}, error) {
-	inflight := func() (chan struct{}, bool) {
+	inflight := func(key string) (chan struct{}, bool) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		done, ok := c.inflight[key]
@@ -209,18 +234,25 @@ func (c *SubtitleCache) startBundleBuild(src SubtitleBundleSource, format, key s
 	select {
 	case c.warmSem <- struct{}{}:
 	default:
-		done, _ := inflight()
+		done, _ := inflight(key)
 		return done, nil
 	}
 	fill := c.beginFill(src.Path, src.Track, format)
 	if fill == nil {
 		<-c.warmSem
-		if done, ok := inflight(); ok {
+		if done, ok := inflight(key); ok {
 			return done, nil
 		}
 		return nil, errors.New("subtitle bundle: the subtitle cache cannot take a build")
 	}
-	done, _ := inflight()
+	// The previous builder may have failed after this caller checked the
+	// negative cache. Recheck while owning the newly reserved build key.
+	if err := c.bundleFailure(fill.key); err != nil {
+		fill.Discard()
+		<-c.warmSem
+		return nil, err
+	}
+	done, _ := inflight(fill.key)
 	go c.buildBundle(src, fill)
 	return done, nil
 }
@@ -239,15 +271,20 @@ func (c *SubtitleCache) buildBundle(src SubtitleBundleSource, fill *SubtitleCach
 		// source's answers 422 (ErrSubtitleBundleFailed).
 		// Remember before the fill releases its key, so no request in
 		// between begins the build again.
-		c.mu.Lock()
-		c.bundleFailures[fill.key] = subtitleBundleFailure{err: err, at: time.Now()}
-		c.mu.Unlock()
+		c.rememberBundleFailure(fill.key, err)
 		fill.Discard()
 		slog.Warn("subtitle bundle build failed", "component", "playback",
 			"input", src.Path, "track", src.Track, "elapsed_ms", time.Since(started).Milliseconds(), "error", err)
 		return
 	}
-	if err := fill.Commit(); err != nil {
+	// Keep the build key reserved through failure publication, including
+	// sync and rename failures, so a waiting request observes the backoff.
+	err = fill.commit()
+	if err != nil {
+		c.rememberBundleFailure(fill.key, err)
+	}
+	c.release(fill.key)
+	if err != nil {
 		slog.Warn("subtitle bundle commit failed", "component", "playback",
 			"input", src.Path, "track", src.Track, "error", err)
 		return
@@ -256,17 +293,20 @@ func (c *SubtitleCache) buildBundle(src SubtitleBundleSource, fill *SubtitleCach
 		"input", src.Path, "track", src.Track, "elapsed_ms", time.Since(started).Milliseconds())
 }
 
+// subtitleBundleSourceError distinguishes an unusable source from a core
+// failure. Only a source fault prevents retrying the work on another executor.
+func subtitleBundleSourceError(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() != nil || errors.As(err, new(processStartError)) || errors.As(err, new(*os.PathError)) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrSubtitleBundleFailed, err)
+}
+
 // writeSubtitleBundle writes src's bundle to w: the script, extracted into a
 // temporary file in scratchDir so its size heads its entry, then the fonts,
 // streamed from FFmpeg. A failure of FFmpeg or ffprobe on the source, or of
 // the checks of what they wrote, wraps ErrSubtitleBundleFailed.
 func writeSubtitleBundle(ctx context.Context, src SubtitleBundleSource, scratchDir string, w io.Writer) error {
-	sourceFault := func(err error) error {
-		if err == nil || ctx.Err() != nil || errors.As(err, new(processStartError)) {
-			return err
-		}
-		return fmt.Errorf("%w: %w", ErrSubtitleBundleFailed, err)
-	}
 	script, err := os.CreateTemp(scratchDir, "bundle-script.part-*")
 	if err != nil {
 		return err
@@ -288,10 +328,10 @@ func writeSubtitleBundle(ctx context.Context, src SubtitleBundleSource, scratchD
 		ffmpegMapArg, "0:s:" + strconv.Itoa(src.Track), "-c:s", codec, "-f", subtitleFormatASS, ffmpegStdout,
 	}, script, maxBundleScriptBytes)
 	if err != nil {
-		return sourceFault(fmt.Errorf("extract track: %w", err))
+		return subtitleBundleSourceError(ctx, fmt.Errorf("extract track: %w", err))
 	}
 	if err := checkASSScript(script.Name()); err != nil {
-		return sourceFault(err)
+		return subtitleBundleSourceError(ctx, err)
 	}
 	info, err := script.Stat()
 	if err != nil {
@@ -306,14 +346,14 @@ func writeSubtitleBundle(ctx context.Context, src SubtitleBundleSource, scratchD
 	}
 	streams, err := probeFontAttachmentStreams(ctx, src.Path, ffprobePathFromFFmpeg(ffmpeg))
 	if err != nil {
-		return sourceFault(err)
+		return subtitleBundleSourceError(ctx, err)
 	}
 	err = streamFontAttachments(ctx, src.Path, ffmpeg, bundleFontStreams(streams), func(_ int, stream attachmentProbeStream, data io.Reader) error {
 		name := path.Join(subtitleBundleFontsDir, "attachment-"+strconv.Itoa(stream.Index)+bundleFontExt(stream))
 		return writeBundleEntry(tw, name, stream.ExtraDataSize, data)
 	})
 	if err != nil {
-		return sourceFault(err)
+		return subtitleBundleSourceError(ctx, err)
 	}
 	return tw.Close()
 }

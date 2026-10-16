@@ -472,6 +472,9 @@ func TestLookupReportsAnUnreachableStore(t *testing.T) {
 	if card, ok, err := store.Lookup(context.Background(), "sid"); err == nil || ok || card != nil {
 		t.Fatalf("Lookup on an unreachable store = (%v, %v, %v), want an error", card, ok, err)
 	}
+	if allowed, err := store.TokenFallbackAllowed(t.Context(), playback.RecipeCard{TranscodeNodeURL: "http://node"}); err == nil || allowed {
+		t.Fatalf("TokenFallbackAllowed on unreachable store = %v, %v, want an error", allowed, err)
+	}
 	if card, ok := store.Get(context.Background(), "sid"); ok || card != nil {
 		t.Fatalf("Get on an unreachable store = (%v, %v), want a miss", card, ok)
 	}
@@ -488,5 +491,48 @@ func TestLookupReportsAnUnreachableStore(t *testing.T) {
 	t.Cleanup(func() { _ = live.Close() })
 	if card, ok, err := NewStore(live, time.Minute).Lookup(context.Background(), "missing-"+uuid.NewString()); err != nil || ok || card != nil {
 		t.Fatalf("Lookup of a missing recipe = (%v, %v, %v), want a clean miss", card, ok, err)
+	}
+}
+
+func TestTokenRecipeAuthoritySurvivesMissingRecord(t *testing.T) {
+	rawURL := os.Getenv("SILO_TEST_REDIS_URL")
+	if rawURL == "" {
+		t.Skip("SILO_TEST_REDIS_URL not set")
+	}
+	options, err := redis.ParseURL(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := redis.NewClient(options)
+	t.Cleanup(func() { _ = client.Close() })
+	store := NewStore(client, time.Minute)
+	unique := uuid.NewString()
+	for _, byID := range []bool{false, true} {
+		t.Run(strconv.FormatBool(byID), func(t *testing.T) {
+			card := playback.RecipeCard{TranscodeNodeURL: "http://node-" + unique}
+			if byID {
+				parsed, err := strconv.ParseInt(unique[:7], 16, 64)
+				if err != nil {
+					t.Fatal(err)
+				}
+				card.RoutingExecutionNodeID = int(parsed) + 1
+			}
+			key := nodeAuthorityGenerationKeyForCard(card)
+			t.Cleanup(func() { _ = client.Del(context.Background(), key).Err() })
+			if active, err := store.TokenFallbackAllowed(t.Context(), card); err != nil || !active {
+				t.Fatalf("before revocation = %v, %v", active, err)
+			}
+			if byID {
+				err = store.RevokeNodeID(t.Context(), card.RoutingExecutionNodeID)
+			} else {
+				err = store.RevokeNode(t.Context(), card.TranscodeNodeURL)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if active, err := store.TokenFallbackAllowed(t.Context(), card); err != nil || active {
+				t.Fatalf("after revocation = %v, %v", active, err)
+			}
+		})
 	}
 }

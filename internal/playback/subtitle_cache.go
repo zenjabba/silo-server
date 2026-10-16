@@ -622,17 +622,22 @@ func (t *subtitleTeeWriter) Flush() {
 // discards instead) when a tee write failed or when the source file changed
 // while the extract ran — a partial or mismatched entry must never be served.
 func (f *SubtitleCacheFill) Commit() error {
+	defer f.c.release(f.key)
+	return f.commit()
+}
+
+// commit publishes without releasing the reservation. Bundle builds must
+// record a failure before waking waiters or admitting another demux.
+func (f *SubtitleCacheFill) commit() error {
 	if f.failed {
-		f.Discard()
+		f.closeAndRemoveTmp()
 		return errors.New("subtitle cache fill had write errors; discarded")
 	}
 	if src, err := os.Stat(f.inputPath); err != nil ||
 		!src.ModTime().Equal(f.srcMtime) || src.Size() != f.srcSize {
-		f.Discard()
+		f.closeAndRemoveTmp()
 		return errors.New("source file changed during extract; cache fill discarded")
 	}
-	defer f.c.release(f.key)
-
 	tmpPath := f.tmp.Name()
 	if err := f.tmp.Sync(); err != nil {
 		f.closeAndRemoveTmp()
