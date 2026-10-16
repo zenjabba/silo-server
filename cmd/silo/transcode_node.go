@@ -135,7 +135,7 @@ func runTranscodeNode() {
 	remote.OnLoad(normalizeLoadedConfig)
 	slog.Info("reading this node's configuration from the core", "core_url", env.coreURL, "node_id", client.NodeID())
 	if err := remote.Load(appCtx); err != nil {
-		log.Fatalf("transcode node configuration: %v", err)
+		log.Fatalf("transcode node configuration: %v", err) //nolint:gocritic // No worker or reporter has started; exiting closes the debug listener with the process.
 	}
 	cfg := remote.Config()
 	nodeName := remote.NodeName()

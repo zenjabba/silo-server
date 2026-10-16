@@ -69,6 +69,7 @@ export const v2Operations = {
   "DELETE /api/v2/notifications/discord-link": "unlinkNotificationDiscord",
   "DELETE /api/v2/notifications/email-preferences/address": "clearNotificationEmailAddress",
   "DELETE /api/v2/notifications/push/devices/{device_id}": "unregisterPushDevice",
+  "DELETE /api/v2/notifications/series/{series_id}/mute": "unmuteNotificationSeries",
   "DELETE /api/v2/notifications/web-push/subscriptions/{id}":
     "deleteNotificationWebPushSubscription",
   "DELETE /api/v2/notifications/webhooks/{id}": "deleteNotificationWebhook",
@@ -588,7 +589,6 @@ export const v2Operations = {
   "POST /api/v2/admin/collections/import/mdblist": "importAdminMDBList",
   "POST /api/v2/admin/collections/import/tmdb": "importAdminTMDB",
   "POST /api/v2/admin/collections/import/tmdb-list": "importAdminTMDBList",
-  "POST /api/v2/admin/collections/import/trakt": "importAdminTrakt",
   "POST /api/v2/admin/collections/preview": "previewAdminCollection",
   "POST /api/v2/admin/collections/template-bundles/{bundle_id}/apply":
     "applyAdminCollectionTemplateBundle",
@@ -737,7 +737,6 @@ export const v2Operations = {
   "POST /api/v2/collections/import/mdblist": "importMDBListCollection",
   "POST /api/v2/collections/import/tmdb": "importTMDBCollection",
   "POST /api/v2/collections/import/tmdb-list": "importTMDBListCollection",
-  "POST /api/v2/collections/import/trakt": "importTraktCollection",
   "POST /api/v2/collections/preview": "previewCollection",
   "POST /api/v2/collections/{id}/sync": "syncCollection",
   "POST /api/v2/devices/push/apple": "registerApplePushDevice",
@@ -897,6 +896,7 @@ export const v2Operations = {
   "PUT /api/v2/notifications/email-preferences": "updateNotificationEmailPreferences",
   "PUT /api/v2/notifications/email-preferences/address": "requestNotificationEmailVerification",
   "PUT /api/v2/notifications/preferences": "updateNotificationPreferences",
+  "PUT /api/v2/notifications/series/{series_id}/mute": "muteNotificationSeries",
   "PUT /api/v2/notifications/webhooks/{id}": "updateNotificationWebhook",
   "PUT /api/v2/onboarding/progress": "updateOnboardingProgress",
   "PUT /api/v2/profile/sections": "replaceProfileSectionOverrides",
