@@ -408,6 +408,7 @@ func startRemuxWithOptions(ctx context.Context, filePath, outputFormat string, s
 	// probe when the filter would actually run.
 	dropLeadingPictures = dropLeadingPictures && seekSeconds > 0 && !audioOnly && supportsLeadingPictureDropFilter(bin)
 	args := buildRemuxArgsWithLeadingPictureDropV3(filePath, outputFormat, seekSeconds, transcodeAudio, audioTrackIndex, effectiveProfile, tagSampleEntry, audioOnly, sourceAudioChannels, targetAudioChannels, targetAudioBitrateKbps, dropLeadingPictures)
+	// #nosec G204 -- Configured/discovered FFmpeg with generated remux argv and stdout output; relay inputs retain protocol/demuxer restrictions.
 	cmd := exec.CommandContext(ctx, bin, nodesource.RestrictArgs(args)...)
 
 	stdout, err := cmd.StdoutPipe()

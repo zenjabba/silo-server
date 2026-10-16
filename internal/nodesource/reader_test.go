@@ -374,13 +374,7 @@ func TestSequentialReaderCloseInterruptsAStalledRead(t *testing.T) {
 		_, err := reader.ReadAt(make([]byte, 300), 2000)
 		read <- err
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for len(core.seenRanges()) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the read never reached the core")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitFor(t, func() bool { return len(core.seenRanges()) > 0 })
 	closed := make(chan struct{})
 	go func() {
 		_ = reader.Close()

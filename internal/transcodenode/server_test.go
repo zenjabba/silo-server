@@ -3811,6 +3811,8 @@ func TestShutdownClosesUnderTheLifecycleLock(t *testing.T) {
 	unlock := server.lockSessionLifecycle("held")
 	shutdown := make(chan error, 1)
 	go func() { shutdown <- server.Shutdown(context.Background()) }()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
 	waiting := func() bool {
 		server.lifecycleMu.Lock()
 		defer server.lifecycleMu.Unlock()
@@ -3828,7 +3830,7 @@ func TestShutdownClosesUnderTheLifecycleLock(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("Shutdown never waited for the lifecycle lock")
 		}
-		time.Sleep(time.Millisecond)
+		<-poll.C
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("the session closed while its lifecycle lock was held: %v", err)

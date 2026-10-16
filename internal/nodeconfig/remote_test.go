@@ -204,12 +204,16 @@ func TestRemoteRequestReloadRefetchesNow(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("RequestReload did not read the configuration")
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 	for remote.Config().Playback.HWDevice != "/dev/dri/renderD130" {
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatal("the reread document was not applied")
+		case <-poll.C:
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 

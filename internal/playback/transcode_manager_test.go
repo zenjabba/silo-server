@@ -777,18 +777,19 @@ func TestStartShutdownCleanup_ClosesUnderTheLifecycleLock(t *testing.T) {
 		lk := m.lifecycleLocks["held"]
 		return lk != nil && lk.refs == 2
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
 	for !waiting() {
 		select {
 		case <-done:
 			unlock()
 			t.Fatal("shutdown cleanup closed the session without its lifecycle lock")
-		default:
-		}
-		if time.Now().After(deadline) {
+		case <-deadline.C:
 			t.Fatal("shutdown cleanup never waited for the lifecycle lock")
+		case <-ticker.C:
 		}
-		time.Sleep(time.Millisecond)
 	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("the session closed while its lifecycle lock was held: %v", err)

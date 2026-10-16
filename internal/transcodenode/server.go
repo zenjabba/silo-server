@@ -2004,31 +2004,9 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 			_ = input.Close()
 		}
 	}()
-	outputDir := s.sessionOutputDir(sessionID)
-	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)
-	opts.InputPath = input.Input()
-	opts.SourceIdentity = input.Identity()
-	opts.CopyPlanRecordPath = s.copyPlanRecordPath(sessionID)
-	opts.SessionID = sessionID
-	opts.Reconstructed = true
-	// Recipe cards preserve the original launch tuning, but reconstruction must
-	// retain the normal manifest cushion rather than the fresh-start fast path.
-	opts.FastStart = false
-	// Re-resolve environment-specific encode knobs from this node's live config; the
-	// recipe deliberately omits HWAccel/HWDevice so an operator change applies on
-	// rebuild. Run as a transcode node, not integrated (card.TranscodeOpts defaults).
-	opts.HWAccel = cfg.Playback.HWAccel
-	opts.HWDevice = cfg.Playback.HWDevice
-	opts.SegmentRetentionSeconds = cfg.Playback.SegmentRetentionSeconds
-	opts.NodeType = "transcode"
-	opts.ExecutionMode = "transcode_node"
-	if toneMapRecipeRequested(opts) {
-		err := s.resolveToneMapRecipe(context.WithoutCancel(r.Context()), &opts)
-		if err != nil {
-			slog.ErrorContext(r.Context(), "transcode node reconstruct tone-map recipe unavailable", "component", "transcodenode", "error", err,
-				"session", sessionID, "playback_session_id", sessionID)
-			return nil, err
-		}
+	opts, err := s.reconstructOptions(r.Context(), sessionID, card, cfg, input)
+	if err != nil {
+		return nil, err
 	}
 
 	s.reloadMu.RLock()
@@ -2082,64 +2060,9 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		opts.SeekSeconds = float64(requestedSegment * card.SegmentDuration)
 	}
 
-	// Under hw_accel=auto the reconstruct walks the same safer paths as a
-	// fresh start in this output directory, keeping a slow process rather than
-	// duplicating it.
-	pipeline := s.autoTranscodePipeline(r.Context(), opts)
-	adaptive := pipeline.Enabled()
-	var session *playback.TranscodeSession
-	if adaptive {
-		session, err = playback.StartReconstructTranscode(r.Context(), pipeline, playback.TranscodeStartup{Timeout: playback.ManifestStartupTimeout})
-	} else {
-		session, err = playback.StartTranscode(r.Context(), opts)
-	}
+	session, err := s.startReconstructedSession(r.Context(), sessionID, opts)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "transcode node reconstruct start failed", "component", "transcodenode", "error", err,
-			"session", sessionID, "playback_session_id", sessionID)
-		return nil, reconstructStartError(err)
-	}
-
-	// Readiness is normally the caller's concern, but a VideoToolbox session
-	// can die at encoder init (e.g. a session the hardware cannot create at
-	// these dimensions), and registering the dead session would serve this
-	// media as permanently missing. Outside the automatic pipeline, mirror
-	// handleStart's software retry for the accel StartupRetryHWAccel would
-	// change; other accels keep the existing register-immediately behavior.
-	retryAccel := opts.HWAccel
-	if !adaptive {
-		retryAccel = playback.StartupRetryHWAccel(opts)
-	}
-	if retryAccel != opts.HWAccel {
-		if _, waitErr := session.WaitForManifest(playback.ManifestStartupTimeout); waitErr != nil {
-			if session.IsRunning() {
-				slog.WarnContext(r.Context(), "reconstructed transcode slow to produce a manifest", "component", "transcodenode",
-					"error", waitErr, "session", sessionID, "playback_session_id", sessionID)
-			} else if errors.Is(session.WaitError(), playback.ErrSubtitleStaging) {
-				// Software encoding would need the same staged subtitle.
-				stageErr := session.WaitError()
-				_ = session.Close()
-				return nil, reconstructStartError(stageErr)
-			} else {
-				// Keep the shared output directory: the retry writes into it.
-				_ = session.CloseProcess()
-				slog.WarnContext(r.Context(), "reconstructed transcode crashed during startup; retrying with software encoding",
-					"component", "transcodenode", "error", waitErr, "session", sessionID, "playback_session_id", sessionID)
-				retryOpts := opts
-				retryOpts.HWAccel = retryAccel
-				session, err = playback.StartTranscode(context.WithoutCancel(r.Context()), retryOpts)
-				if err != nil {
-					slog.ErrorContext(r.Context(), "transcode node reconstruct retry failed", "component", "transcodenode", "error", err,
-						"session", sessionID, "playback_session_id", sessionID)
-					return nil, reconstructStartError(err)
-				}
-				if _, retryErr := session.WaitForManifest(playback.ManifestStartupTimeout); retryErr != nil {
-					_ = session.Close()
-					slog.ErrorContext(r.Context(), "reconstructed software retry failed readiness check", "component", "transcodenode", "error", retryErr,
-						"session", sessionID, "playback_session_id", sessionID)
-					return nil, retryErr
-				}
-			}
-		}
+		return nil, err
 	}
 
 	// Yield to a winner registered by another path; close only the duplicate ffmpeg,
@@ -2159,11 +2082,123 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 	s.activeJobs.Add(1)
 	s.armSessionThrottler(session, card.ThrottleSeconds)
 
+	s.trackReconstructedSession(r.Context(), sessionID, session, resolution)
+
+	slog.InfoContext(r.Context(), "transcode node session reconstructed from its recipe", "component", "transcodenode",
+		"session", sessionID, "playback_session_id", sessionID,
+		"requested_segment", requestedSegment, "start_segment_number", opts.StartSegmentNumber)
+	return session, nil
+}
+
+// reconstructOptions applies this node's live tuning to the stored recipe.
+// The caller retains ownership of input through option resolution and startup.
+func (s *Server) reconstructOptions(ctx context.Context, sessionID string, card playback.RecipeCard, cfg *config.Config, input SourceInput) (playback.TranscodeOpts, error) {
+	outputDir := s.sessionOutputDir(sessionID)
+	opts := card.TranscodeOpts(outputDir, cfg.Playback.FFmpegPath, s.ffmpegSink)
+	opts.InputPath = input.Input()
+	opts.SourceIdentity = input.Identity()
+	opts.CopyPlanRecordPath = s.copyPlanRecordPath(sessionID)
+	opts.SessionID = sessionID
+	opts.Reconstructed = true
+	// Recipe cards preserve the original launch tuning, but reconstruction must
+	// retain the normal manifest cushion rather than the fresh-start fast path.
+	opts.FastStart = false
+	// Re-resolve environment-specific encode knobs from this node's live config; the
+	// recipe deliberately omits HWAccel/HWDevice so an operator change applies on
+	// rebuild. Run as a transcode node, not integrated (card.TranscodeOpts defaults).
+	opts.HWAccel = cfg.Playback.HWAccel
+	opts.HWDevice = cfg.Playback.HWDevice
+	opts.SegmentRetentionSeconds = cfg.Playback.SegmentRetentionSeconds
+	opts.NodeType = "transcode"
+	opts.ExecutionMode = "transcode_node"
+	if toneMapRecipeRequested(opts) {
+		err := s.resolveToneMapRecipe(context.WithoutCancel(ctx), &opts)
+		if err != nil {
+			slog.ErrorContext(ctx, "transcode node reconstruct tone-map recipe unavailable", "component", "transcodenode", "error", err,
+				"session", sessionID, "playback_session_id", sessionID)
+			return playback.TranscodeOpts{}, err
+		}
+	}
+
+	return opts, nil
+}
+
+// startReconstructedSession starts the selected pipeline and preserves the
+// software retry for hardware that crashes before producing its manifest.
+func (s *Server) startReconstructedSession(ctx context.Context, sessionID string, opts playback.TranscodeOpts) (*playback.TranscodeSession, error) {
+	// Under hw_accel=auto the reconstruct walks the same safer paths as a
+	// fresh start in this output directory, keeping a slow process rather than
+	// duplicating it.
+	pipeline := s.autoTranscodePipeline(ctx, opts)
+	adaptive := pipeline.Enabled()
+	var (
+		session *playback.TranscodeSession
+		err     error
+	)
+	if adaptive {
+		session, err = playback.StartReconstructTranscode(ctx, pipeline, playback.TranscodeStartup{Timeout: playback.ManifestStartupTimeout})
+	} else {
+		session, err = playback.StartTranscode(ctx, opts)
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "transcode node reconstruct start failed", "component", "transcodenode", "error", err,
+			"session", sessionID, "playback_session_id", sessionID)
+		return nil, reconstructStartError(err)
+	}
+
+	// Readiness is normally the caller's concern, but a VideoToolbox session
+	// can die at encoder init (e.g. a session the hardware cannot create at
+	// these dimensions), and registering the dead session would serve this
+	// media as permanently missing. Outside the automatic pipeline, mirror
+	// handleStart's software retry for the accel StartupRetryHWAccel would
+	// change; other accels keep the existing register-immediately behavior.
+	retryAccel := opts.HWAccel
+	if !adaptive {
+		retryAccel = playback.StartupRetryHWAccel(opts)
+	}
+	if retryAccel != opts.HWAccel {
+		if _, waitErr := session.WaitForManifest(playback.ManifestStartupTimeout); waitErr != nil {
+			if session.IsRunning() {
+				slog.WarnContext(ctx, "reconstructed transcode slow to produce a manifest", "component", "transcodenode",
+					"error", waitErr, "session", sessionID, "playback_session_id", sessionID)
+			} else if errors.Is(session.WaitError(), playback.ErrSubtitleStaging) {
+				// Software encoding would need the same staged subtitle.
+				stageErr := session.WaitError()
+				_ = session.Close()
+				return nil, reconstructStartError(stageErr)
+			} else {
+				// Keep the shared output directory: the retry writes into it.
+				_ = session.CloseProcess()
+				slog.WarnContext(ctx, "reconstructed transcode crashed during startup; retrying with software encoding",
+					"component", "transcodenode", "error", waitErr, "session", sessionID, "playback_session_id", sessionID)
+				retryOpts := opts
+				retryOpts.HWAccel = retryAccel
+				session, err = playback.StartTranscode(context.WithoutCancel(ctx), retryOpts)
+				if err != nil {
+					slog.ErrorContext(ctx, "transcode node reconstruct retry failed", "component", "transcodenode", "error", err,
+						"session", sessionID, "playback_session_id", sessionID)
+					return nil, reconstructStartError(err)
+				}
+				if _, retryErr := session.WaitForManifest(playback.ManifestStartupTimeout); retryErr != nil {
+					_ = session.Close()
+					slog.ErrorContext(ctx, "reconstructed software retry failed readiness check", "component", "transcodenode", "error", retryErr,
+						"session", sessionID, "playback_session_id", sessionID)
+					return nil, retryErr
+				}
+			}
+		}
+	}
+
+	return session, nil
+}
+
+func (s *Server) trackReconstructedSession(ctx context.Context, sessionID string, session *playback.TranscodeSession, resolution *nodecontrol.Resolution) {
+	card := resolution.Recipe
 	// The caller holds the lifecycle lock until this returns, so a stop's
 	// Remove follows this Track (see handleStart). The record keeps the
 	// playback session's own start, not the rebuild's.
 	startedAt, startedSource := resolvedStart(resolution)
-	s.tracker.Track(context.WithoutCancel(r.Context()), nodesessions.SessionInfo{
+	s.tracker.Track(context.WithoutCancel(ctx), nodesessions.SessionInfo{
 		SessionID:         sessionID,
 		NodeURL:           s.tracker.NodeURL(),
 		NodeName:          s.tracker.NodeName(),
@@ -2180,11 +2215,6 @@ func (s *Server) spawnReconstruct(r *http.Request, sessionID string, requestedSe
 		ProfileID:         resolution.ProfileID,
 		MediaFileID:       resolution.MediaFileID,
 	})
-
-	slog.InfoContext(r.Context(), "transcode node session reconstructed from its recipe", "component", "transcodenode",
-		"session", sessionID, "playback_session_id", sessionID,
-		"requested_segment", requestedSegment, "start_segment_number", opts.StartSegmentNumber)
-	return session, nil
 }
 
 // reconstructStartError classifies a rebuild's failed start. One that may

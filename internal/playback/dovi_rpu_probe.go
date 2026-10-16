@@ -207,6 +207,7 @@ func runDVRPUProbe(ctx context.Context, bin, inputPath string) dvRPUVerdict {
 	probeCtx, cancel := context.WithTimeout(ctx, dvRPUProbeTimeout)
 	defer cancel()
 
+	// #nosec G204 -- Configured/discovered FFmpeg with fixed probe argv; source is -i data and relayed inputs retain protocol/demuxer restrictions.
 	cmd := exec.CommandContext(probeCtx, bin, nodesource.RestrictArgs([]string{
 		"-hide_banner",
 		"-nostats",

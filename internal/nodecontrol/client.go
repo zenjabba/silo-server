@@ -232,10 +232,7 @@ const maxResolutionBytes = 1 << 20
 // Resolve* reasons; any other failure, the core's or the network's, is
 // retryable by the node's caller.
 func (c *Client) Resolve(ctx context.Context, req ResolveRequest) (*Resolution, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
+	body, _ := json.Marshal(req)
 	resp, err := c.do(ctx, http.MethodPost, PathResolve, body, nil)
 	if err != nil {
 		return nil, err
@@ -262,10 +259,7 @@ const maxOpenResponseBytes = 64 << 10
 // with Op "open", whose Fatal the relay's retries go by. It is the Open of
 // the node's nodesource.Relay.
 func (c *Client) OpenSource(ctx context.Context, grant string) (*nodesource.OpenResponse, error) {
-	body, err := json.Marshal(nodesource.OpenRequest{Grant: grant})
-	if err != nil {
-		return nil, err
-	}
+	body, _ := json.Marshal(nodesource.OpenRequest{Grant: grant})
 	resp, err := c.do(ctx, http.MethodPost, nodesource.PathOpen, body, nil)
 	if err != nil {
 		return nil, err

@@ -94,10 +94,7 @@ func IngestNodeSessions(ctx context.Context, rdb *redis.Client, nodeID int, node
 		seen[info.SessionID] = struct{}{}
 		info.NodeURL, info.NodeName = nodeURL, nodeName
 		clampStartedAt(&info, latest)
-		data, err := json.Marshal(info)
-		if err != nil {
-			return fmt.Errorf("%w: %w", ErrInvalidSession, err)
-		}
+		data, _ := json.Marshal(info) // SessionInfo contains only strings and integers.
 		keys = append(keys, prefix+info.SessionID)
 		args = append(args, data)
 	}

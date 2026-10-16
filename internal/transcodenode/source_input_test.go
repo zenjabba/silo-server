@@ -50,7 +50,7 @@ func (g *grantPathSources) openInputs() []*testInput {
 // testInput is an opened test source.
 type testInput struct {
 	path   string
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // Models an opened source whose lifetime ends independently of each caller.
 	cancel context.CancelCauseFunc
 }
 
@@ -147,6 +147,8 @@ func TestWithdrawnSourceEndsItsSession(t *testing.T) {
 	if rr := postStart(t, server, "withdrawn"); rr.Code != http.StatusAccepted {
 		t.Fatalf("start = %d %s", rr.Code, rr.Body.String())
 	}
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
 	sources.openInputs()[0].withdraw()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -159,7 +161,7 @@ func TestWithdrawnSourceEndsItsSession(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("a withdrawn source left its session running")
 		}
-		time.Sleep(time.Millisecond)
+		<-poll.C
 	}
 }
 

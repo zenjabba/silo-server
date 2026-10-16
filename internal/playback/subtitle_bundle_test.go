@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -298,7 +299,7 @@ func TestSubtitleBundleFailureCacheBoundsDistinctKeys(t *testing.T) {
 			}
 			const capacity = 1024
 			for i := range capacity {
-				cache.bundleFailures[fmt.Sprint(i)] = subtitleBundleFailure{err: errors.New("old failure"), at: at.Add(time.Duration(i))}
+				cache.bundleFailures[strconv.Itoa(i)] = subtitleBundleFailure{err: errors.New("old failure"), at: at.Add(time.Duration(i))}
 			}
 			ffmpeg, _ := fakeExtractFFmpeg(t, 1)
 			src := SubtitleBundleSource{Path: writeSource(t), Track: 999, Codec: "ass", FFmpegPath: ffmpeg}

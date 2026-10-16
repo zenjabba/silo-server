@@ -250,7 +250,7 @@ type Source struct {
 	Size     int64
 	// Context ends when the source is released or withdrawn. It bounds the
 	// background check that LoadSource starts on the source's behalf.
-	Context context.Context
+	Context context.Context //nolint:containedctx // This is the source handle's lifetime, which must bound shared background verification beyond a request.
 	// Open opens the source for reading, bounded by ctx. Its errors, and
 	// those of the reader, are *fs.PathError (see transient).
 	Open func(ctx context.Context) (ReaderAtCloser, error)

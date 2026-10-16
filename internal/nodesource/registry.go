@@ -74,7 +74,7 @@ func OpenReaderAt(ctx context.Context, input string) (Reader, error) {
 		if err := released(input); err != nil {
 			return nil, err
 		}
-		return os.Open(input)
+		return os.Open(input) // #nosec G304 -- Local inputs come from internal catalog consumers; this helper is not a request path boundary.
 	}
 	return h.ReaderAt(ctx)
 }

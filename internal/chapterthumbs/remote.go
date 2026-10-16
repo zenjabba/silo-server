@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -59,10 +60,10 @@ func (e *httpRemoteFrameExtractor) ExtractFrame(
 	req RemoteExtractRequest,
 ) ([]byte, string, error) {
 	if node == nil {
-		return nil, chapterThumbnailNodeUnavailableReason, fmt.Errorf("chapter thumbnail remote extract: missing node")
+		return nil, chapterThumbnailNodeUnavailableReason, errors.New("chapter thumbnail remote extract: missing node")
 	}
 	if keys == nil {
-		return nil, chapterThumbnailNodeUnavailableReason, fmt.Errorf("chapter thumbnail remote extract: missing node keyring")
+		return nil, chapterThumbnailNodeUnavailableReason, errors.New("chapter thumbnail remote extract: missing node keyring")
 	}
 
 	body, err := json.Marshal(req)

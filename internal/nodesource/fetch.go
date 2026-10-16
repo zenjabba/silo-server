@@ -77,7 +77,7 @@ func (h *Handle) fetchRange(ctx context.Context, off, n int64) (*rangeBody, erro
 // while the read's context lives.
 type rangeBody struct {
 	h      *Handle
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // io.Reader has no context parameter; this context bounds the whole resumable range read.
 	cancel context.CancelFunc
 	stop   func() bool
 	// off is the next byte to read, end the first byte after the range.
@@ -250,7 +250,7 @@ func (b *rangeBody) request() error {
 
 func (b *rangeBody) send(ctx context.Context) (io.ReadCloser, error) {
 	r := b.h.relay
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.coreURL+PathSources, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.coreURL+PathSources, nil) // #nosec G704 -- The operator configures coreURL; source grants cannot choose the destination.
 	if err != nil {
 		return nil, err
 	}
@@ -261,7 +261,7 @@ func (b *rangeBody) send(ctx context.Context) (io.ReadCloser, error) {
 	if err := nodeauth.SignToCore(req, r.coreURL, r.nodeID, r.key); err != nil {
 		return nil, err
 	}
-	resp, err := r.client.Do(req)
+	resp, err := r.client.Do(req) // #nosec G704 -- Only the configured core receives requests; NewRelay disables redirects.
 	if err != nil {
 		return nil, err
 	}
@@ -344,15 +344,9 @@ func (r *Relay) serve(w http.ResponseWriter, req *http.Request) {
 		if req.Context().Err() != nil {
 			return
 		}
-		status := http.StatusBadGateway
-		var statusErr *StatusError
-		if errors.As(err, &statusErr) && (statusErr.Fatal() || statusErr.Status == http.StatusRequestedRangeNotSatisfiable) {
-			status = statusErr.Status
-			if status == http.StatusRequestedRangeNotSatisfiable {
-				header.Set("Content-Range", fmt.Sprintf("bytes */%d", h.size))
-			}
-		} else if handleErr := h.Err(); handleErr != nil {
-			status = handleStatus(handleErr)
+		status := h.fetchFailureStatus(err)
+		if status == http.StatusRequestedRangeNotSatisfiable {
+			header.Set("Content-Range", fmt.Sprintf("bytes */%d", h.size))
 		}
 		header.Del("ETag")
 		http.Error(w, http.StatusText(status), status)
@@ -455,4 +449,15 @@ func parseRange(header string, size int64) (start, length int64, partial, satisf
 		to = min(to, size-1)
 	}
 	return from, to - from + 1, true, true
+}
+
+func (h *Handle) fetchFailureStatus(err error) int {
+	var statusErr *StatusError
+	if errors.As(err, &statusErr) && (statusErr.Fatal() || statusErr.Status == http.StatusRequestedRangeNotSatisfiable) {
+		return statusErr.Status
+	}
+	if handleErr := h.Err(); handleErr != nil {
+		return handleStatus(handleErr)
+	}
+	return http.StatusBadGateway
 }

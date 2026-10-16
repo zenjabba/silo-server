@@ -101,7 +101,7 @@ func serveLocalPaths(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 G703 -- This loopback-only test core deliberately treats an absolute fixture path as its grant.
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -137,7 +137,7 @@ func approveLocalPath(_ context.Context, grant string) (*nodesource.OpenResponse
 
 // regularFile describes path when it is a regular file, else nil.
 func regularFile(path string) os.FileInfo {
-	info, err := os.Stat(path)
+	info, err := os.Stat(path) // #nosec G703 -- Fixture paths are capabilities in this test core; production grants are signed by the real core.
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}

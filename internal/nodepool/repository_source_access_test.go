@@ -3,7 +3,7 @@ package nodepool
 import (
 	"context"
 	"errors"
-	"fmt"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -16,7 +16,7 @@ func TestAdminConfigurationStoreSourceAccess(t *testing.T) {
 	ctx := context.Background()
 	store := NewAdminConfigurationStore(pool)
 	repo := NewRepository(pool)
-	suffix := fmt.Sprint(time.Now().UnixNano())
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 10)
 	create := func(input CreateNodeInput) *Node {
 		t.Helper()
 		node, err := store.Create(ctx, input)

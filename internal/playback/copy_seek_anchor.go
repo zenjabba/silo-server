@@ -136,7 +136,7 @@ func resolveCopySeekAnchor(
 	requestedSeekSeconds float64,
 	segmentDuration int,
 ) (float64, int, error) {
-
+	// #nosec G204 -- Configured/discovered FFmpeg, fixed probe argv, source passed only as -i data; relay inputs receive protocol/demuxer restrictions.
 	cmd := exec.CommandContext(ctx, ffmpegPath, nodesource.RestrictArgs([]string{
 		"-v", "error",
 		"-fflags", "+genpts+fastseek",

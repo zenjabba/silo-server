@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 
@@ -130,7 +131,9 @@ func (s *Server) mediaSampleLimiter(capacity int) *mediasample.Limiter {
 func writeMediaSampleError(w http.ResponseWriter, status int, reason mediasample.Reason, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(mediasample.RemoteFailure{Reason: reason, Error: nodesource.RedactLoopback(message)})
+	if err := json.NewEncoder(w).Encode(mediasample.RemoteFailure{Reason: reason, Error: nodesource.RedactLoopback(message)}); err != nil {
+		slog.Error("write media sample error", "component", "transcodenode", "error", err)
+	}
 }
 
 // ProtocolMediaSample describes the media sampling route.

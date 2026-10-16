@@ -115,19 +115,35 @@ func TestNodeClientsRoundTripThroughTheCore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Configuration.
-	remote := nodeconfig.NewRemote(client, ":8080")
-	if err := remote.Load(ctx); err != nil {
-		t.Fatal(err)
+	assertConfigurationRoundTrip(t, ctx, client, node.ID)
+
+	assertReportRoundTrip(t, ctx, client, node, rdb, telemetry)
+
+	// Logs.
+	message := fmt.Sprintf("roundtrip log %d", suffix)
+	if err := client.ShipLogs(ctx, []opslog.Entry{{Timestamp: time.Now(), Level: "INFO", Component: "transcodenode", Message: message, NodeID: "spoofed"}}); err != nil {
+		t.Fatalf("ship logs: %v", err)
 	}
-	if id, ok := remote.NodeRowID(); !ok || id != node.ID || remote.Config().Playback.HWAccel != "vaapi" {
-		t.Fatalf("node %d (%v) runs %q, want node %d on vaapi", id, ok, remote.Config().Playback.HWAccel, node.ID)
-	}
-	first := remote.Config()
-	if err := remote.ForceReload(ctx); err != nil || remote.Config() != first {
-		t.Fatalf("an unchanged reread: %v, pointer kept %v", err, remote.Config() == first)
+	var stamped string
+	if err := pool.QueryRow(ctx, `SELECT node_id FROM operational_logs WHERE message = $1`, message).Scan(&stamped); err != nil || stamped != nodecontrol.LogNodeID(node.Name, node.ID) {
+		t.Fatalf("stored log entry node %q (%v), want %q", stamped, err, nodecontrol.LogNodeID(node.Name, node.ID))
 	}
 
+	// Health change.
+	if err := client.NotifyHealthChanged(ctx); err != nil {
+		t.Fatalf("health-changed: %v", err)
+	}
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if len(bus.events) != 1 || bus.events[0].Type != cache.EventNodeDrainChanged || bus.events[0].Payload != strconv.Itoa(node.ID) {
+		t.Fatalf("published %+v", bus.events)
+	}
+}
+
+// assertReportRoundTrip checks the readers used by the admin views after the
+// real reporter has sent its node sessions and telemetry through the core.
+func assertReportRoundTrip(t *testing.T, ctx context.Context, client *nodecontrol.Client, node *nodepool.Node, rdb *redis.Client, telemetry *streamtelemetry.RedisStore) {
+	t.Helper()
 	// Report.
 	tracker := nodesessions.NewLocalTracker(nil)
 	tracker.Track(ctx, nodesessions.SessionInfo{SessionID: "rt-1", Type: "transcode"})
@@ -152,24 +168,20 @@ func TestNodeClientsRoundTripThroughTheCore(t *testing.T) {
 	if err != nil || len(set.Snapshots) != 1 || set.Snapshots[0].PublisherID != nodecontrol.PublisherID(node.ID) {
 		t.Fatalf("telemetry readers see %+v (%v)", set, err)
 	}
+}
 
-	// Logs.
-	message := fmt.Sprintf("roundtrip log %d", suffix)
-	if err := client.ShipLogs(ctx, []opslog.Entry{{Timestamp: time.Now(), Level: "INFO", Component: "transcodenode", Message: message, NodeID: "spoofed"}}); err != nil {
-		t.Fatalf("ship logs: %v", err)
+func assertConfigurationRoundTrip(t *testing.T, ctx context.Context, client *nodecontrol.Client, nodeID int) {
+	t.Helper()
+	// Configuration.
+	remote := nodeconfig.NewRemote(client, ":8080")
+	if err := remote.Load(ctx); err != nil {
+		t.Fatal(err)
 	}
-	var stamped string
-	if err := pool.QueryRow(ctx, `SELECT node_id FROM operational_logs WHERE message = $1`, message).Scan(&stamped); err != nil || stamped != nodecontrol.LogNodeID(node.Name, node.ID) {
-		t.Fatalf("stored log entry node %q (%v), want %q", stamped, err, nodecontrol.LogNodeID(node.Name, node.ID))
+	if id, ok := remote.NodeRowID(); !ok || id != nodeID || remote.Config().Playback.HWAccel != "vaapi" {
+		t.Fatalf("node %d (%v) runs %q, want node %d on vaapi", id, ok, remote.Config().Playback.HWAccel, nodeID)
 	}
-
-	// Health change.
-	if err := client.NotifyHealthChanged(ctx); err != nil {
-		t.Fatalf("health-changed: %v", err)
-	}
-	bus.mu.Lock()
-	defer bus.mu.Unlock()
-	if len(bus.events) != 1 || bus.events[0].Type != cache.EventNodeDrainChanged || bus.events[0].Payload != strconv.Itoa(node.ID) {
-		t.Fatalf("published %+v", bus.events)
+	first := remote.Config()
+	if err := remote.ForceReload(ctx); err != nil || remote.Config() != first {
+		t.Fatalf("an unchanged reread: %v, pointer kept %v", err, remote.Config() == first)
 	}
 }

@@ -42,7 +42,7 @@ type Reader interface {
 // verdict on the file.
 type RangeReader struct {
 	h        *Handle
-	ctx      context.Context
+	ctx      context.Context //nolint:containedctx // io.ReaderAt has no context parameter; all reads share the reader's bounded lifetime.
 	cancel   context.CancelFunc
 	maxBytes int64
 

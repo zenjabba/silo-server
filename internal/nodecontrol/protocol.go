@@ -115,10 +115,7 @@ type LoggingConfig struct {
 
 // newNodeConfig wraps body with its revision.
 func newNodeConfig(body NodeConfigBody) (NodeConfig, error) {
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return NodeConfig{}, err
-	}
+	encoded, _ := json.Marshal(body)
 	sum := sha256.Sum256(encoded)
 	return NodeConfig{Revision: hex.EncodeToString(sum[:]), NodeConfigBody: body}, nil
 }

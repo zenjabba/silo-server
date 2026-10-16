@@ -97,9 +97,13 @@ func (s *Server) HandleResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "recipe resolution unavailable", http.StatusServiceUnavailable)
 	case refusal != nil:
 		w.WriteHeader(refusal.status)
-		_ = json.NewEncoder(w).Encode(ResolveRefusal{Reason: refusal.reason})
+		if err := json.NewEncoder(w).Encode(ResolveRefusal{Reason: refusal.reason}); err != nil {
+			slog.ErrorContext(r.Context(), "write resolve refusal", "component", "nodecontrol", "node_id", id, "error", err)
+		}
 	default:
-		_ = json.NewEncoder(w).Encode(resolution)
+		if err := json.NewEncoder(w).Encode(resolution); err != nil {
+			slog.ErrorContext(r.Context(), "write resolution", "component", "nodecontrol", "node_id", id, "error", err)
+		}
 	}
 }
 
@@ -157,28 +161,11 @@ func (s *Server) resolveHLS(ctx context.Context, nodeID int, req ResolveRequest)
 	if s.denied(ctx, transportID, "") {
 		return nil, refuseDenied
 	}
-	var card playback.RecipeCard
-	var claims *streamtoken.Claims
-	complete := false
-	if req.StreamToken != "" {
-		verified, refusal := s.verifyToken(req.StreamToken)
-		if refusal == refuseUnavailable {
-			return nil, refusal
-		}
-		if refusal != nil {
-			slog.WarnContext(ctx, "resolve: invalid stream token", "component", "nodecontrol", "session", transportID, "playback_session_id", transportID)
-			return nil, refuseNotFound
-		}
-		claims = verified
-		card = playback.RecipeCardFromClaims(claims)
-		if !recipeServesTransport(card, transportID) {
-			return nil, refuseNotFound
-		}
-		if s.denied(ctx, transportID, claims.SessionID) {
-			return nil, refuseDenied
-		}
-		complete = recipeIsComplete(card)
+	card, claims, refusal := s.tokenHLSRecipe(ctx, req)
+	if refusal != nil {
+		return nil, refusal
 	}
+	complete := recipeIsComplete(card)
 	stored, refusal := s.storedHLSRecipe(ctx, transportID)
 	if refusal != nil {
 		return nil, refusal
@@ -212,6 +199,31 @@ func (s *Server) resolveHLS(ctx context.Context, nodeID int, req ResolveRequest)
 	startedAt, source := sessionStart(card, claims)
 	resolution.StartedAt, resolution.StartedAtSource = startedAt, string(source)
 	return resolution, nil
+}
+
+// tokenHLSRecipe validates a supplied token before any stored recipe can
+// replace it. A missing token removes one recipe source; an invalid token or
+// a token for another transport refuses the entire request.
+func (s *Server) tokenHLSRecipe(ctx context.Context, req ResolveRequest) (playback.RecipeCard, *streamtoken.Claims, *resolveRefusal) {
+	if req.StreamToken == "" {
+		return playback.RecipeCard{}, nil, nil
+	}
+	claims, refusal := s.verifyToken(req.StreamToken)
+	if refusal == refuseUnavailable {
+		return playback.RecipeCard{}, nil, refusal
+	}
+	if refusal != nil {
+		slog.WarnContext(ctx, "resolve: invalid stream token", "component", "nodecontrol", "session", req.TransportID, "playback_session_id", req.TransportID)
+		return playback.RecipeCard{}, nil, refuseNotFound
+	}
+	card := playback.RecipeCardFromClaims(claims)
+	if !recipeServesTransport(card, req.TransportID) {
+		return playback.RecipeCard{}, nil, refuseNotFound
+	}
+	if s.denied(ctx, req.TransportID, claims.SessionID) {
+		return playback.RecipeCard{}, nil, refuseDenied
+	}
+	return card, claims, nil
 }
 
 // storedHLSRecipe reads the complete transcode recipe the store holds for

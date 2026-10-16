@@ -209,27 +209,12 @@ func resolveCopyPlan(ctx context.Context, opts TranscodeOpts) (*copySegmentPlan,
 	identity := sourceIdentity(opts)
 	path := copyPlanRecordPath(opts)
 	followRecord := opts.Reconstructed || opts.CopyPlanRecordPath == ""
-	if data, err := os.ReadFile(path); err == nil && followRecord {
-		var rec copyPlanRecord
-		if err := json.Unmarshal(data, &rec); err == nil {
-			if rec.SourceIdentity != "" && identity != "" && rec.SourceIdentity != identity {
-				return nil, "", ErrCopyPlanSourceChanged
-			}
-			if opts.CopyPlanRecordPath != "" {
-				// A record that is followed is in use: keep the age sweep
-				// (playback.SweepCopyPlanRecords) off it.
-				now := time.Now()
-				_ = os.Chtimes(path, now, now)
-			}
-			if !rec.Planned {
-				return nil, "", nil
-			}
-			if plan := rec.plan(); plan != nil {
-				return plan, "", nil
-			}
+	if followRecord {
+		// #nosec G304 -- Internal path: a fixed output filename or the node's hash-named record beneath its configured cache.
+		if data, err := os.ReadFile(path); err == nil {
+			plan, err := recordedCopyPlan(data, path, identity, opts)
+			return plan, "", err
 		}
-		log.Printf("playback: session %s has an unreadable keyframe plan record; using FFmpeg's playlist", opts.SessionID)
-		return nil, "", nil
 	}
 
 	// Record the decision whatever the start's fate: StartTranscode launches
@@ -259,6 +244,32 @@ func resolveCopyPlan(ctx context.Context, opts TranscodeOpts) (*copySegmentPlan,
 	return plan, candidate, nil
 }
 
+// recordedCopyPlan follows a readable record without replanning. A malformed
+// record keeps FFmpeg's playlist; a mismatched source revision is terminal.
+func recordedCopyPlan(data []byte, path, identity string, opts TranscodeOpts) (*copySegmentPlan, error) {
+	var rec copyPlanRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		log.Printf("playback: session %s has an unreadable keyframe plan record; using FFmpeg's playlist", opts.SessionID)
+		return nil, nil //nolint:nilerr // Malformed cache records intentionally keep FFmpeg's playlist; source mismatches below remain terminal.
+	}
+	if rec.SourceIdentity != "" && identity != "" && rec.SourceIdentity != identity {
+		return nil, ErrCopyPlanSourceChanged
+	}
+	if opts.CopyPlanRecordPath != "" {
+		// A followed record is in use: keep the age sweep off it.
+		now := time.Now()
+		_ = os.Chtimes(path, now, now)
+	}
+	if !rec.Planned {
+		return nil, nil
+	}
+	if plan := rec.plan(); plan != nil {
+		return plan, nil
+	}
+	log.Printf("playback: session %s has an unreadable keyframe plan record; using FFmpeg's playlist", opts.SessionID)
+	return nil, nil
+}
+
 // copyPlanCandidateInfix marks a candidate record, written beside the
 // record it would replace (see resolveCopyPlan).
 const copyPlanCandidateInfix = ".candidate-"
@@ -271,7 +282,7 @@ func writeCopyPlanRecord(path string, rec copyPlanRecord, publish bool) (string,
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return "", err
 	}
 	infix := ".tmp-"

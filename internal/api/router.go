@@ -329,6 +329,11 @@ type Dependencies struct {
 	// clients hitting /login, /api/*, /abs/api/*, and /abs/socket.io/* all
 	// resolve correctly. May be nil; no ABS routes are registered in that case.
 	ABSHandler absHandler
+
+	// LocalTLSPin is the pin of the key the API listener presents over TLS on
+	// its own port (internal/lantls), published in the connections document.
+	// Empty when the listener does not answer TLS (tests).
+	LocalTLSPin string
 }
 
 // absHandler is the narrow interface the router needs from the ABS handler.
@@ -1181,6 +1186,8 @@ func newChiRouter(deps Dependencies) chi.Router {
 			// So do ratings and recommendation state; the Postgres store
 			// already deleted them with the profile.
 			profileHandler.RecommendationsPurger = recommendations.NewRepo(deps.DB)
+			// Ebook reading data lives there too.
+			profileHandler.EbookReaderPurger = handlers.NewPGEbookReaderProgressStore(deps.DB)
 		}
 		if watchlistRequestWithdrawer != nil {
 			profileHandler.WatchlistRequestWithdrawer = watchlistRequestWithdrawer
@@ -1443,6 +1450,14 @@ func newChiRouter(deps Dependencies) chi.Router {
 		// transcodes from after a restart. Same nil-safety: without Redis such a
 		// session replans instead of recovering, as it did before.
 		playbackHandler.NodeRecipeStore = noderecipe.NewStore(deps.RedisClient, 0)
+		// Keep the recipe of a header-authenticated session server-side, the only
+		// place it exists, so a restarted or different API process can rebuild the
+		// playback session. Same nil-safety: without Redis such a session answers
+		// 404 after a restart and the client starts a new attempt.
+		playbackHandler.SessionRecipeStore = noderecipe.NewSessionRecipeStore(deps.RedisClient, 0)
+		if streamHandler != nil {
+			streamHandler.SessionRecipeStore = playbackHandler.SessionRecipeStore
+		}
 		if deps.Config != nil {
 			playbackHandler.PlaybackConfig = func() config.PlaybackConfig {
 				return deps.CurrentConfig().Playback
@@ -2500,12 +2515,21 @@ func newChiRouter(deps Dependencies) chi.Router {
 	if deps.DB != nil {
 		v2deps.ServerIdentity = serveridentity.New(catalog.NewServerSettingsRepo(deps.DB))
 	}
-	v2deps.ServerConnections = apiv2.ServerConnections{PublicURL: func() string {
-		if cfg := deps.CurrentConfig(); cfg != nil {
-			return cfg.Server.PublicURL
-		}
-		return ""
-	}}
+	v2deps.ServerConnections = apiv2.ServerConnections{
+		PublicURL: func() string {
+			if cfg := deps.CurrentConfig(); cfg != nil {
+				return cfg.Server.PublicURL
+			}
+			return ""
+		},
+		LocalURL: func() string {
+			if cfg := deps.CurrentConfig(); cfg != nil {
+				return cfg.Server.LocalURL
+			}
+			return ""
+		},
+		LocalTLSPin: deps.LocalTLSPin,
+	}
 	if deps.NetworkAccess != nil {
 		v2deps.ServerConnections.Providers = deps.NetworkAccess.Status
 	}
@@ -2596,6 +2620,9 @@ func newChiRouter(deps Dependencies) chi.Router {
 	}
 	v2deps.ObserveDownloadDelivery = func(method, pattern string, handler http.Handler) http.Handler {
 		return observeNative(deps.StreamTelemetry, method, pattern, handler.ServeHTTP)
+	}
+	v2deps.ObserveBandwidthProbe = func(handler http.Handler) http.Handler {
+		return observeNative(deps.StreamTelemetry, http.MethodGet, "/api/v2/playback/bandwidth-probe", handler.ServeHTTP)
 	}
 
 	var themeHandler *handlers.ThemeHandler
@@ -3040,6 +3067,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	v2deps.Recipes = &handlers.RecipeHandler{}
 	if personalDataHandler != nil && itemsHandler != nil {
 		v2deps.PersonalLists = personalDataHandler
+		v2deps.NotInterested = personalDataHandler
 	}
 	if ratingsHandler != nil {
 		v2deps.Ratings = ratingsHandler
@@ -4795,48 +4823,7 @@ func newChiRouter(deps Dependencies) chi.Router {
 	// credential, so they sit outside every auth group. They work on any API
 	// replica: nothing a later request depends on stays in this process.
 	if deps.NodeKeyRegistry != nil && deps.NodeRepo != nil && settingsRepo != nil {
-		nodeControlOptions := nodecontrol.Options{
-			Nodes:      deps.NodeRepo,
-			Identities: deps.NodeKeyRegistry,
-			Settings:   nodeConfigSettings(settingsRepo),
-			Redis:      deps.RedisClient,
-			Telemetry:  streamtelemetry.NodeSnapshotStore(deps.StreamTelemetry),
-			Events:     deps.EventBus,
-			// Resolve verifies the stream tokens nodes no longer hold the
-			// secret for, against the recipes and deny markers playback
-			// writes.
-			StreamSecret: func() string {
-				if cfg := deps.CurrentConfig(); cfg != nil {
-					return cfg.Auth.JWTSecret
-				}
-				return ""
-			},
-			Recipes: noderecipe.NewStore(deps.RedisClient, 0),
-		}
-		if deps.SourceGrants != nil {
-			nodeControlOptions.Grants = deps.SourceGrants
-		}
-		// Subtitle bundles share the stream handler's subtitle cache, whose
-		// warm slots bound every whole-source demux on this server.
-		if streamHandler != nil && streamHandler.SubtitleCache != nil {
-			nodeControlOptions.Subtitles = streamHandler.SubtitleCache
-			nodeControlOptions.FFmpegPath = func() string {
-				if cfg := deps.CurrentConfig(); cfg != nil {
-					return cfg.Playback.FFmpegPath
-				}
-				return ""
-			}
-		}
-		// A nil *StreamDeny must not become a non-nil DenySource.
-		if streamDeny != nil {
-			nodeControlOptions.Deny = streamDeny
-		}
-		if deps.DB != nil {
-			nodeControlOptions.Logs = opslog.NewConsumer(deps.DB, deps.LogStreamHub)
-			nodeControlOptions.Files = scanner.NewFileRepository(deps.DB)
-			nodeControlOptions.Themes = themesongs.NewRepository(deps.DB)
-		}
-		nodeControl := nodecontrol.NewServer(nodeControlOptions)
+		nodeControl := newNodeControlServer(deps, settingsRepo, streamHandler, streamDeny)
 		r.Route("/api/internal/nodes/self", func(r chi.Router) {
 			r.Use(nodecontrol.RequireNode(deps.NodeKeyRegistry))
 			r.Get("/config", nodeControl.HandleConfig)
@@ -4861,6 +4848,51 @@ func newChiRouter(deps Dependencies) chi.Router {
 		nodeHandler.StartConfigurationReconciliation(deps.AppContext)
 	}
 	return r
+}
+
+func newNodeControlServer(deps Dependencies, settings catalog.SettingsStore, stream *handlers.StreamHandler, deny *playback.StreamDeny) *nodecontrol.Server {
+	nodeControlOptions := nodecontrol.Options{
+		Nodes:      deps.NodeRepo,
+		Identities: deps.NodeKeyRegistry,
+		Settings:   nodeConfigSettings(settings),
+		Redis:      deps.RedisClient,
+		Telemetry:  streamtelemetry.NodeSnapshotStore(deps.StreamTelemetry),
+		Events:     deps.EventBus,
+		// Resolve verifies the stream tokens nodes no longer hold the
+		// secret for, against the recipes and deny markers playback
+		// writes.
+		StreamSecret: func() string {
+			if cfg := deps.CurrentConfig(); cfg != nil {
+				return cfg.Auth.JWTSecret
+			}
+			return ""
+		},
+		Recipes: noderecipe.NewStore(deps.RedisClient, 0),
+	}
+	if deps.SourceGrants != nil {
+		nodeControlOptions.Grants = deps.SourceGrants
+	}
+	// Subtitle bundles share the stream handler's subtitle cache, whose
+	// warm slots bound every whole-source demux on this server.
+	if stream != nil && stream.SubtitleCache != nil {
+		nodeControlOptions.Subtitles = stream.SubtitleCache
+		nodeControlOptions.FFmpegPath = func() string {
+			if cfg := deps.CurrentConfig(); cfg != nil {
+				return cfg.Playback.FFmpegPath
+			}
+			return ""
+		}
+	}
+	// A nil *StreamDeny must not become a non-nil DenySource.
+	if deny != nil {
+		nodeControlOptions.Deny = deny
+	}
+	if deps.DB != nil {
+		nodeControlOptions.Logs = opslog.NewConsumer(deps.DB, deps.LogStreamHub)
+		nodeControlOptions.Files = scanner.NewFileRepository(deps.DB)
+		nodeControlOptions.Themes = themesongs.NewRepository(deps.DB)
+	}
+	return nodecontrol.NewServer(nodeControlOptions)
 }
 
 // nodeConfigSettings reads the server settings a transcode node's

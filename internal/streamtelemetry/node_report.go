@@ -109,7 +109,7 @@ func NodeSnapshotStore(registry *Registry) *RedisStore {
 // push the roster cutoff forward to evict other publishers.
 func (s *RedisStore) IngestNodeSnapshot(ctx context.Context, publisherID, nodeName string, epoch int64, sequence uint64, wire NodeSnapshot, now, latest time.Time) error {
 	if s == nil || s.client == nil {
-		return fmt.Errorf("stream telemetry redis client is nil")
+		return errors.New("stream telemetry redis client is nil")
 	}
 	if wire.DroppedObservations < 0 || wire.DroppedBytes < 0 || wire.UnattributedObservations < 0 || wire.UnattributedBytes < 0 {
 		return fmt.Errorf("%w: negative counter", ErrInvalidNodeSnapshot)

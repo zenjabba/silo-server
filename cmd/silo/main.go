@@ -69,6 +69,7 @@ import (
 	"github.com/Silo-Server/silo-server/internal/imagecache"
 	"github.com/Silo-Server/silo-server/internal/intromarkers"
 	"github.com/Silo-Server/silo-server/internal/jellycompat"
+	"github.com/Silo-Server/silo-server/internal/lantls"
 	"github.com/Silo-Server/silo-server/internal/libraryingest"
 	"github.com/Silo-Server/silo-server/internal/librarymonitor"
 	"github.com/Silo-Server/silo-server/internal/literaryworks"
@@ -780,6 +781,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("secret cipher: %v", err)
 	}
+	// The API listener also answers TLS on its own port, with a key derived
+	// from SECRET_KEY, so signed-in clients can use the server's local-network
+	// address over a channel they authenticate by pin (internal/lantls).
+	lanTLS, err := lantls.New(bc.SecretKey)
+	if err != nil {
+		log.Fatalf("local network TLS: %v", err)
+	}
 
 	// Step 2: Connect to PostgreSQL (bootstrap pool with default max connections)
 	bootstrapDBCfg := config.DatabaseConfig{URL: bc.DatabaseURL, MaxConnections: 20}
@@ -792,25 +800,10 @@ func main() {
 
 	if *migrateStatus {
 		migCtx, migCancel := database.MigrationContext(ctx)
-		statuses, statusErr := database.MigrationStatuses(migCtx, pool, migrations.FS, "sql")
+		statusErr := database.PrintMigrationStatus(migCtx, pool, migrations.FS, "sql", os.Stdout)
 		migCancel()
 		if statusErr != nil {
 			log.Fatalf("failed to read migration status: %v", statusErr)
-		}
-
-		fmt.Printf("%-8s %8s %-25s %s\n", "STATE", "VERSION", "APPLIED_AT", "MIGRATION")
-		for _, status := range statuses {
-			appliedAt := "-"
-			if !status.AppliedAt.IsZero() {
-				appliedAt = status.AppliedAt.UTC().Format(time.RFC3339)
-			}
-			source := status.Source
-			if source != "" {
-				source = filepath.Base(source)
-			} else {
-				source = "-"
-			}
-			fmt.Printf("%-8s %8d %-25s %s\n", status.State, status.Version, appliedAt, source)
 		}
 		return
 	}
@@ -832,10 +825,7 @@ func main() {
 
 	if *migrateOnly {
 		migCtx, migCancel := database.MigrationContext(ctx)
-		migErr := database.RunMigrations(migCtx, pool, migrations.FS, "sql")
-		if migErr == nil {
-			migErr = ensureAuditDetailIndexes(migCtx, pool)
-		}
+		migErr := database.MigrateOnly(migCtx, pool, migrations.FS, "sql")
 		migCancel()
 		if migErr != nil {
 			log.Fatalf("failed to run migrations: %v", migErr)
@@ -853,10 +843,7 @@ func main() {
 	isPrimaryNode := bc.Mode == "integrated" || bc.Mode == "api" || bc.Mode == ""
 	if isPrimaryNode {
 		migCtx, migCancel := database.MigrationContext(ctx)
-		migErr := database.RunMigrations(migCtx, pool, migrations.FS, "sql")
-		if migErr == nil {
-			migErr = ensureAuditDetailIndexes(migCtx, pool)
-		}
+		migErr := database.MigrateOnly(migCtx, pool, migrations.FS, "sql")
 		if migErr != nil {
 			migCancel()
 			log.Fatalf("failed to run migrations: %v", migErr)
@@ -1095,20 +1082,7 @@ func main() {
 		// Resolved before the watcher starts: NODE_URL is this process's
 		// stream_nodes identity, and the watcher needs it on its very first
 		// load to overlay the node's own acceleration overrides.
-		nodeURL := os.Getenv("NODE_URL")
-		nodeName := os.Getenv("NODE_NAME")
-		if nodeURL == "" {
-			nodeURL = "http://localhost" + cfg.Server.Listen
-			// The guess is this process's whole identity: it keys session
-			// bookkeeping *and* selects the stream_nodes row whose acceleration
-			// overrides this node adopts. Two nodes listening on the same port
-			// guess the same URL and would share both.
-			slog.Warn("NODE_URL not set, using listen address — session keys may collide across nodes, and this node adopts the acceleration overrides of whichever stream_nodes row carries that URL",
-				"node_url", nodeURL)
-		}
-		if nodeName == "" {
-			nodeName = mode
-		}
+		nodeURL, nodeName := proxyNodeIdentity(cfg.Server.Listen, mode)
 
 		bootstrap := nodeconfig.BootstrapOverrides{
 			Listen:      cfg.Server.Listen,
@@ -1133,13 +1107,7 @@ func main() {
 			defer cleanupCancel()
 			tracker.Cleanup(cleanupCtx)
 		}()
-		defer func() {
-			telemetryCtx, telemetryCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer telemetryCancel()
-			if stopErr := streamTelemetryRegistry.Stop(telemetryCtx); stopErr != nil {
-				slog.Error("stream telemetry shutdown error", "error", stopErr)
-			}
-		}()
+		defer stopProxyTelemetry(streamTelemetryRegistry)
 
 		srv := proxy.NewServer(watcher, tracker)
 		proxyIPResolver, resolverErr := clientIPResolverFromConfig(watcher.Config())
@@ -1166,19 +1134,7 @@ func main() {
 		srv.SetStreamDeny(playback.NewStreamDeny(redisClient))
 		// Relays to transcode nodes sign with each node's own key, so this
 		// proxy keeps the same credential registry the API servers do.
-		nodeKeys := nodepool.NewKeyRegistry(nodepool.NewRepository(pool), dataCipher)
-		if err := nodeKeys.Refresh(appCtx); err != nil {
-			slog.Error("load stream node credentials failed", "error", err)
-			os.Exit(1)
-		}
-		nodeKeys.Start(appCtx)
-		if err := eventBus.Subscribe(appCtx, cache.ChannelAdmin, func(event cache.Event) {
-			if event.Type == cache.EventNodePoolChanged {
-				nodeKeys.Invalidate()
-			}
-		}); err != nil {
-			slog.Warn("node credential reload events unavailable; reloading every minute instead", "error", err)
-		}
+		nodeKeys := startProxyNodeKeys(appCtx, pool, dataCipher, eventBus)
 		srv.SetNodeKeys(nodeKeys.Keyring(func() string { return watcher.Config().Auth.JWTSecret }))
 		srv.SetRemoteArtifactMissReporter(downloads.NewArtifactManager(
 			downloads.NewArtifactRepository(pool),
@@ -1629,6 +1585,7 @@ func main() {
 	// revoke, status pushes) and all three listeners (token validation).
 	networkAccess := netaccess.NewBroker()
 	deps.NetworkAccess = networkAccess
+	deps.LocalTLSPin = lanTLS.Pin()
 	if deps.DB != nil {
 		pluginCacheDir := resolvePluginCacheDir()
 		repositoryStore := plugins.NewRepositoryStore(deps.DB)
@@ -3674,6 +3631,7 @@ func main() {
 			SourceGrants:         deps.SourceGrants,
 			RecWorker:            recWorker,
 			FrontendFS:           deps.FrontendFS,
+			ArtworkStore:         deps.Blobs.Assets,
 			// Hand remote-transcode recipes to the shared recipe store so a dedicated
 			// transcode node that restarts can rebuild a jellycompat session.
 			RecipeNodeStore: noderecipe.NewStore(apiRedisClient, 0),
@@ -3899,7 +3857,7 @@ func main() {
 	} else {
 		go func() {
 			slog.Info("HTTP server listening", "addr", cfg.Server.Listen)
-			if serveErr := srv.Serve(apiListener); serveErr != nil && serveErr != http.ErrServerClosed {
+			if serveErr := srv.Serve(lantls.NewListener(apiListener, lanTLS.Config(), 0)); serveErr != nil && serveErr != http.ErrServerClosed {
 				errCh <- fmt.Errorf("HTTP server error: %w", serveErr)
 			}
 		}()
@@ -4935,9 +4893,4 @@ type audiobooksSettingsAdapter struct {
 
 func (a *audiobooksSettingsAdapter) GetString(ctx context.Context, key string) (string, error) {
 	return a.repo.Get(ctx, key)
-}
-
-func ensureAuditDetailIndexes(ctx context.Context, pool *pgxpool.Pool) error {
-	return partman.NewManager(pool, "activity_log", partman.Weekly, 2).EnsureIndexes(ctx,
-		"activity_log_action_time_idx", "activity_log_target_time_idx")
 }

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,16 +44,7 @@ func startSession(t *testing.T, node integrationNode, req TranscodeStartRequest)
 	session := node.server.sessions[req.SessionID]
 	node.server.mu.RUnlock()
 	t.Cleanup(func() { stopSession(t, node.server, req.SessionID) })
-	deadline := time.Now().Add(time.Minute)
-	for session.IsRunning() {
-		if time.Now().After(deadline) {
-			t.Fatalf("%s session %s did not finish", node.name, req.SessionID)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err := session.WaitError(); err != nil {
-		t.Fatalf("%s session %s: %v", node.name, req.SessionID, err)
-	}
+	waitFinishedWithin(t, session, time.Minute)
 	manifest, err := session.BuildPlaybackManifest("", "")
 	if err != nil {
 		t.Fatalf("%s session %s manifest: %v", node.name, req.SessionID, err)
@@ -94,6 +86,8 @@ func TestCoreSourceKeyframePlaylistMatchesLocal(t *testing.T) {
 
 	results := map[string]string{}
 	bothModes(t, local, core, func(node integrationNode) string {
+		poll := time.NewTicker(50 * time.Millisecond)
+		defer poll.Stop()
 		deadline := time.Now().Add(30 * time.Second)
 		for attempt := 0; ; attempt++ {
 			req := TranscodeStartRequest{
@@ -130,7 +124,7 @@ func TestCoreSourceKeyframePlaylistMatchesLocal(t *testing.T) {
 			if time.Now().After(deadline) {
 				t.Fatalf("%s never planned the keyframe playlist after %d starts", node.name, attempt+1)
 			}
-			time.Sleep(50 * time.Millisecond)
+			<-poll.C
 		}
 	})
 	if results["local"] == "" || results["core"] != results["local"] {
@@ -305,43 +299,7 @@ func TestCoreSourceToneMapPreflightMatchesLocal(t *testing.T) {
 	// before 7 lacks (no HDR10 frame carries them).
 	t.Run("preflight", func(t *testing.T) {
 		bothModes(t, local, core, func(node integrationNode) string {
-			h, err := node.relay.Open(t.Context(), node.grant(t, fileID))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer func() { _ = h.Close() }()
-			var commands []string
-			runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
-				if len(args) == 1 && args[0] == "-version" {
-					return nil, errors.New("uncached")
-				}
-				for i, arg := range args {
-					args[i] = strings.ReplaceAll(arg, ",sidedata=mode=delete:type=DOVI_RPU_BUFFER,sidedata=mode=delete:type=DOVI_METADATA", "")
-				}
-				commands = append(commands, strings.Join(args, " "))
-				return exec.CommandContext(ctx, name, args...).CombinedOutput()
-			}
-			err = tonemap.ValidateSourceWithRunner(t.Context(), tonemap.SourcePreflightRequest{
-				FFmpegPath: ffmpeg, InputPath: h.Input(), DurationSeconds: 3, SourceBitDepth: 10,
-				Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterHable,
-				Kind: tonemap.SourcePQ, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, SourceRevision: revision,
-			}, runner)
-			if err != nil {
-				t.Fatalf("%s preflight: %v\n%s", node.name, err, strings.Join(commands, "\n"))
-			}
-			read := 0
-			for _, command := range commands {
-				if strings.Contains(command, h.Input()) {
-					read++
-					if h.Remote() && !strings.Contains(command, "-protocol_whitelist http,tcp -format_whitelist "+nodesource.AdmittedFormats) {
-						t.Fatalf("relayed preflight command not held to the relay: %s", command)
-					}
-				}
-			}
-			if read == 0 {
-				t.Fatalf("%s preflight never read the source: %q", node.name, commands)
-			}
-			return fmt.Sprint(read)
+			return sourceToneMapPreflight(t, node, ffmpeg, fileID, revision)
 		})
 	})
 
@@ -364,6 +322,49 @@ func TestCoreSourceToneMapPreflightMatchesLocal(t *testing.T) {
 			return hlsVideo(t, ffmpeg, dir)
 		})
 	})
+}
+
+// sourceToneMapPreflight runs uncached representative-frame validation and
+// checks that each relayed read keeps FFmpeg within the source relay.
+func sourceToneMapPreflight(t *testing.T, node integrationNode, ffmpeg string, fileID int, revision tonemap.SourceRevision) string {
+	t.Helper()
+	h, err := node.relay.Open(t.Context(), node.grant(t, fileID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = h.Close() }()
+	var commands []string
+	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if len(args) == 1 && args[0] == "-version" {
+			return nil, errors.New("uncached")
+		}
+		for i, arg := range args {
+			args[i] = strings.ReplaceAll(arg, ",sidedata=mode=delete:type=DOVI_RPU_BUFFER,sidedata=mode=delete:type=DOVI_METADATA", "")
+		}
+		commands = append(commands, strings.Join(args, " "))
+		return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	}
+	err = tonemap.ValidateSourceWithRunner(t.Context(), tonemap.SourcePreflightRequest{
+		FFmpegPath: ffmpeg, InputPath: h.Input(), DurationSeconds: 3, SourceBitDepth: 10,
+		Mode: tonemap.ModeSoftware, Backend: tonemap.BackendSoftware, Filter: tonemap.SoftwareFilterHable,
+		Kind: tonemap.SourcePQ, RecipeVersion: playback.TransformationHDRToSDRToneMapRecipeVersionV3, SourceRevision: revision,
+	}, runner)
+	if err != nil {
+		t.Fatalf("%s preflight: %v\n%s", node.name, err, strings.Join(commands, "\n"))
+	}
+	read := 0
+	for _, command := range commands {
+		if strings.Contains(command, h.Input()) {
+			read++
+			if h.Remote() && !strings.Contains(command, "-protocol_whitelist http,tcp -format_whitelist "+nodesource.AdmittedFormats) {
+				t.Fatalf("relayed preflight command not held to the relay: %s", command)
+			}
+		}
+	}
+	if read == 0 {
+		t.Fatalf("%s preflight never read the source: %q", node.name, commands)
+	}
+	return strconv.Itoa(read)
 }
 
 // The Dolby Vision strip probe runs on a relayed source instead of failing

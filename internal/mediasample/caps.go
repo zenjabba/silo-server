@@ -95,14 +95,11 @@ func (c Capabilities) Require(req Request) error {
 		}
 	}
 	if req.Samples != nil && !req.Samples.ReadThrough {
-		if nodesource.IsRemote(req.Input) {
-			if !c.relayedConcatSamples {
-				return unsupportedError("ffmpeg cannot read a sampled list of a relayed source (concat demuxer with file_packet_meta and per-file options, http, tcp and pipe protocols)")
-			}
-		} else if !c.concatSamples {
-			return unsupportedError("ffmpeg cannot read a sampled input list (concat demuxer with file_packet_meta, file and pipe protocols)")
+		if err := c.requireSampleConcat(req.Input); err != nil {
+			return err
 		}
 	}
+
 	if req.Sheets != nil && !c.HasFilter(filterMetadata) {
 		return unsupportedError("ffmpeg does not list the metadata filter")
 	}
@@ -112,6 +109,19 @@ func (c Capabilities) Require(req Request) error {
 				return unsupportedError(fmt.Sprintf("ffmpeg does not list the %s filter", filter))
 			}
 		}
+	}
+	return nil
+}
+
+func (c Capabilities) requireSampleConcat(input string) error {
+	if nodesource.IsRemote(input) {
+		if !c.relayedConcatSamples {
+			return unsupportedError("ffmpeg cannot read a sampled list of a relayed source (concat demuxer with file_packet_meta and per-file options, http, tcp and pipe protocols)")
+		}
+		return nil
+	}
+	if !c.concatSamples {
+		return unsupportedError("ffmpeg cannot read a sampled input list (concat demuxer with file_packet_meta, file and pipe protocols)")
 	}
 	return nil
 }

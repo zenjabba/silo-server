@@ -858,36 +858,10 @@ func (h *NodeHandler) HandleListSessions(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	var sessions []json.RawMessage
-	if nodeID > 0 {
-		// The node's own records, not every record under the hash of its URL:
-		// see nodesessions.NodeRecords.
-		records, err := nodesessions.NodeRecords(ctx, h.redisClient, nodeID, nodeURL)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "redis_error", err.Error())
-			return
-		}
-		sessions = records
-	} else {
-		var cursor uint64
-		for {
-			keys, next, err := h.redisClient.Scan(ctx, cursor, "silo:sessions:*", 100).Result()
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "redis_error", err.Error())
-				return
-			}
-			for _, key := range keys {
-				val, err := h.redisClient.Get(ctx, key).Result()
-				if err != nil {
-					continue
-				}
-				sessions = append(sessions, json.RawMessage(val))
-			}
-			cursor = next
-			if cursor == 0 {
-				break
-			}
-		}
+	sessions, err := h.nodeSessionRecords(ctx, nodeID, nodeURL)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "redis_error", err.Error())
+		return
 	}
 
 	if sessions == nil {
@@ -936,5 +910,31 @@ func (h *NodeHandler) reloadPools(ctx context.Context) {
 
 	if h.eventBus != nil {
 		_ = h.eventBus.Publish(ctx, cache.ChannelAdmin, cache.Event{Type: cache.EventNodePoolChanged})
+	}
+}
+
+// nodeSessionRecords reads one node's scoped records or the complete roster.
+func (h *NodeHandler) nodeSessionRecords(ctx context.Context, nodeID int, nodeURL string) ([]json.RawMessage, error) {
+	if nodeID > 0 {
+		return nodesessions.NodeRecords(ctx, h.redisClient, nodeID, nodeURL)
+	}
+	var sessions []json.RawMessage
+	var cursor uint64
+	for {
+		keys, next, err := h.redisClient.Scan(ctx, cursor, "silo:sessions:*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			val, err := h.redisClient.Get(ctx, key).Result()
+			if err != nil {
+				continue
+			}
+			sessions = append(sessions, json.RawMessage(val))
+		}
+		cursor = next
+		if cursor == 0 {
+			return sessions, nil
+		}
 	}
 }

@@ -121,6 +121,7 @@ func (d *SideData) UnmarshalJSON(data []byte) error {
 // playable video stream using the same normalization as a catalog scan.
 func ProbePrimaryVideoTrack(ctx context.Context, ffprobePath, filePath string) (models.VideoTrack, error) {
 	// A transcode node's relayed source is held to the relay (nodesource).
+	// #nosec G204 -- Configured FFprobe executable; restricted argv treats the approved source path as data.
 	cmd := exec.CommandContext(ctx, ffprobePath, nodesource.RestrictProbeArgs([]string{
 		"-v", "quiet",
 		"-print_format", "json",

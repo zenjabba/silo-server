@@ -14,7 +14,7 @@ import (
 
 // streamTokenHeader carries the stream token a relay forwards with a media
 // request. The node passes it to the core unread.
-const streamTokenHeader = "X-Silo-Stream-Token"
+const streamTokenHeader = "X-Silo-Stream-Token" //nolint:gosec // G101: the public HTTP header name is not a credential.
 
 // errNoRecipeResolver is a node wired without the core's recipe resolution.
 var errNoRecipeResolver = errors.New("transcode node has no recipe resolver")

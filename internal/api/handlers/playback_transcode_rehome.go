@@ -448,6 +448,7 @@ func (h *PlaybackHandler) moveTranscodeToLocalV3(
 		return err
 	}
 	h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID)
+	h.followSessionRecipeMoveV3(ctx, session.ID, local)
 	slog.WarnContext(ctx, "moved a transcode off an unreachable node", "component", "api",
 		"from_node", logredact.SanitizeURL(dead.NodeURL), "executor", "api",
 		"playback_session_id", session.ID, "requested_segment", requestedSegment)
@@ -574,6 +575,7 @@ func (h *PlaybackHandler) moveTranscodeToNodeV3(
 		return err
 	}
 	h.retireUnreachableTransportV3(ctx, dead.NodeURL, transportID)
+	h.followSessionRecipeMoveV3(ctx, session.ID, next)
 	slog.WarnContext(ctx, "moved a transcode off an unreachable node", "component", "api",
 		"from_node", logredact.SanitizeURL(dead.NodeURL), "executor", "transcode_node",
 		"to_node", logredact.SanitizeURL(node.URL), "playback_session_id", session.ID,

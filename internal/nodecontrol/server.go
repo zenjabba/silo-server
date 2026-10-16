@@ -136,7 +136,9 @@ func (s *Server) HandleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(doc)
+	if err := json.NewEncoder(w).Encode(doc); err != nil {
+		slog.ErrorContext(r.Context(), "write node configuration", "component", "nodecontrol", "node_id", id, "error", err)
+	}
 }
 
 // nodeConfig builds node id's configuration from the same settings and row

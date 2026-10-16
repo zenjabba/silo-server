@@ -11,5 +11,5 @@ import (
 // raced into a FIFO before the open. The caller still checks the descriptor
 // is a regular file.
 func openNonblocking(path string) (*os.File, error) {
-	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- Callers supply a core-approved catalog path and check the opened descriptor's revision.
 }

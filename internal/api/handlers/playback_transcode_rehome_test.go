@@ -651,12 +651,16 @@ func TestRelayMoveRetiresOldNodeWithoutDroppingTheMovedRecipe(t *testing.T) {
 // waitForCount waits until counter reaches want.
 func waitForCount(t *testing.T, counter *atomic.Int32, want int32, what string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
 	for counter.Load() < want {
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatalf("%s = %d, want %d", what, counter.Load(), want)
+		case <-poll.C:
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 

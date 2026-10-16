@@ -161,6 +161,7 @@ func (r *Relay) Open(ctx context.Context, grant string) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
+	handleCtx, cancel := context.WithCancelCause(context.Background())
 	h := &Handle{
 		relay:   r,
 		path:    opened.Path,
@@ -168,9 +169,10 @@ func (r *Relay) Open(ctx context.Context, grant string) (*Handle, error) {
 		modTime: time.Unix(opened.Mtime, 0),
 		etag:    opened.ETag,
 		remote:  r.mode() == ModeCore,
+		ctx:     handleCtx,
+		cancel:  cancel,
 	}
 	h.setGrant(opened.Grant, r.now())
-	h.ctx, h.cancel = context.WithCancelCause(context.Background())
 	if !h.remote {
 		if err := r.checkLocal(ctx, h); err != nil {
 			h.cancel(err)
@@ -367,7 +369,7 @@ type Handle struct {
 	grant   string
 	expires time.Time
 
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // A handle owns its job lifetime; closing or withdrawing it cancels every reader and renewal.
 	cancel context.CancelCauseFunc
 	closed atomic.Bool
 }

@@ -136,7 +136,7 @@ func (c *fakeCore) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	latency := c.latency
 	c.mu.Unlock()
-	time.Sleep(latency)
+	time.Sleep(latency) //nolint:forbidigo // Simulate network latency to verify sequential reads finish within their budget.
 	defer func() {
 		c.mu.Lock()
 		c.inFlight--
@@ -669,12 +669,16 @@ func TestRenewalGivesUpWhenTheGrantExpires(t *testing.T) {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
 	for !cond() {
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatal("condition not reached")
+		case <-poll.C:
 		}
-		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -757,7 +761,7 @@ func TestRelayDownstreamPausesDoNotUseTheRetryWindow(t *testing.T) {
 		offset.Add(int64(time.Minute))
 		core.queue(injection{status: http.StatusServiceUnavailable})
 		rest, err := io.ReadAll(body)
-		if err != nil || !bytes.Equal(append(head, rest...), core.data) {
+		if err != nil || !bytes.Equal(head, core.data[:len(head)]) || !bytes.Equal(rest, core.data[len(head):]) {
 			t.Fatalf("read after a pause: %d bytes, %v", len(rest), err)
 		}
 	})
@@ -815,7 +819,7 @@ func TestRelayCloseEndsEveryHandle(t *testing.T) {
 		t.Fatalf("open after close: %v", err)
 	}
 	// Close waited for the renewal loops, so none calls the core again.
-	time.Sleep(20 * relay.renewInterval)
+	time.Sleep(20 * relay.renewInterval) //nolint:forbidigo // A negative timing assertion: no renewal may happen after Close across several renewal periods.
 	if got := core.openCount(); got != opens {
 		t.Fatalf("core called %d times after the relay closed", got-opens)
 	}

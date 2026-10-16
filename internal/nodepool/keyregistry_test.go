@@ -283,15 +283,19 @@ func TestKeyRegistryInvalidateReloadsInTheBackground(t *testing.T) {
 	row, key := keyedRow(t, 8, "http://gpu-8")
 	rows.set(row)
 	registry.Invalidate()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
 	for {
 		if cred := registry.lookupID(8); cred != nil && cred.key == key {
 			return
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatal("Invalidate did not reload the registry")
+		case <-poll.C:
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 

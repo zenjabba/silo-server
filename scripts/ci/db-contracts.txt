@@ -18,6 +18,9 @@
 ./internal/scanner TestMatroskaTrackBackfillReadsEachFileOnce
 ./internal/scanner TestScanStateCarriesProbeRejectionDB
 ./internal/scanner TestRescanKeepsProbeFactsOfARejectedUnchangedFileDB
+./internal/scanner TestFinalizeVariantsKeepsMatchSuppressionDB
+./internal/scanner TestFinalizeVariantsRetotalsPartsLeftByARenameDB
+./internal/scanner TestFinalizeVariantsReadsWholeGroupFoundOutsideTheScopeDB
 ./migrations TestScanRunForeignKeysHaveLeadingIndexesDB
 
 # Series air-date sort keys advance when a known episode airs.
@@ -175,6 +178,13 @@
 ./internal/downloads TestDownloadLinkedToCanceledPreparationFails
 ./internal/userstore/pgstore TestPostgresClearResumePosition
 ./internal/userstore/pgstore TestPostgresCollectionContinuation
+./internal/userstore/pgstore TestPostgresDeleteProfileCoversEveryProfileTable
+./internal/userstore/pgstore TestPostgresDeleteProfileRemovesProfileState
+./internal/userstore/pgstore TestPostgresConcurrentSectionOverrideSaves
+./internal/userstore/pgstore TestPostgresConcurrentProfileDeletesWithCrossVisibility
+./internal/userstore/pgstore TestPostgresConcurrentProfileAndCollectionDeletes
+./internal/userstore/pgstore TestPostgresConcurrentProfileDeleteAndCollectionReorder
+./internal/api/handlers TestEbookReaderPurgeProfileDB
 ./internal/userstore/pgstore TestPostgresMarkWatchedBatch
 ./internal/userstore/pgstore TestPostgresPersonalListPage
 
@@ -357,3 +367,7 @@
 ./internal/metadata TestMatchQueuesSkipIgnoredItemsDB
 ./internal/metadata TestRefreshLeavesIgnoredItemAloneDB
 ./internal/adminjob TestLibraryRefreshSkipsIgnoredItemsDB
+
+# A played mark later in the same second as a history removal stays visible.
+./internal/userstore/pgstore TestImportedWritesAfterSameSecondRemovalDB
+./internal/webhooksync TestProcessWebhookPlayedInSameSecondAsUnplayedDB

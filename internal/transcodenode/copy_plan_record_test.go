@@ -119,6 +119,8 @@ func TestOrphanSweepKeepsTheRecordDirectory(t *testing.T) {
 	s.mu.Unlock()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 	s.StartOrphanSweeper(ctx)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -129,7 +131,7 @@ func TestOrphanSweepKeepsTheRecordDirectory(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the sweep kept a stale record")
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-poll.C
 	}
 	if _, err := os.Stat(live); err != nil {
 		t.Fatalf("the sweep removed a live session's record: %v", err)

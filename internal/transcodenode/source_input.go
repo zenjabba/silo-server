@@ -37,7 +37,7 @@ type SourceOpener interface {
 }
 
 // RelaySources is the SourceOpener of a node's source relay.
-func RelaySources(relay *nodesource.Relay) SourceOpener { return relaySources{relay: relay} }
+func RelaySources(relay *nodesource.Relay) relaySources { return relaySources{relay: relay} }
 
 type relaySources struct{ relay *nodesource.Relay }
 

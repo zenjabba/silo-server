@@ -55,7 +55,10 @@ func sourceIdentity(t *testing.T, name string) string {
 	t.Helper()
 	identity := fmt.Sprintf(`"file-%s-%d"`, name, identities.Add(1))
 	t.Cleanup(func() {
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
 		for {
 			indexCache.Lock()
 			running := false
@@ -66,11 +69,12 @@ func sourceIdentity(t *testing.T, name string) string {
 			if !running {
 				return
 			}
-			if time.Now().After(deadline) {
+			select {
+			case <-deadline.C:
 				t.Error("a background check outlived its test")
 				return
+			case <-ticker.C:
 			}
-			time.Sleep(time.Millisecond)
 		}
 	})
 	return identity
@@ -131,17 +135,21 @@ func TestLoadSourceVerifiesInTheBackground(t *testing.T) {
 	if _, err := LoadSource(t.Context(), src.source(t.Context(), identity)); !errors.Is(err, ErrUnverified) {
 		t.Fatalf("first LoadSource err = %v, want ErrUnverified", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		got, err := LoadSource(t.Context(), src.source(t.Context(), identity))
 		if !errors.Is(err, ErrUnverified) {
 			wantIndex(t, got, err)
 			break
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatal("the background check didn't finish")
+		case <-ticker.C:
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	released, release := context.WithCancel(t.Context())
@@ -175,18 +183,22 @@ func TestFullCheckOpensTheSequentialReader(t *testing.T) {
 		if _, err := LoadSource(t.Context(), source); !errors.Is(err, ErrUnverified) {
 			t.Fatalf("quick check = %v", err)
 		}
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.NewTimer(5 * time.Second)
+		ticker := time.NewTicker(5 * time.Millisecond)
 		for {
 			got, err := LoadSource(t.Context(), source)
 			if !errors.Is(err, ErrUnverified) {
 				wantIndex(t, got, err)
 				break
 			}
-			if time.Now().After(deadline) {
+			select {
+			case <-deadline.C:
 				t.Fatal("the background check never finished")
+			case <-ticker.C:
 			}
-			time.Sleep(5 * time.Millisecond)
 		}
+		deadline.Stop()
+		ticker.Stop()
 		if random.opens.Load() != 1 || sequential.opens.Load() != 1 {
 			t.Fatalf("background check opened %d random (want the quick check's 1), %d sequential readers", random.opens.Load(), sequential.opens.Load())
 		}

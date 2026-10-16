@@ -6458,6 +6458,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v2/capabilities/not-interested": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Whether the acting profile can mark movies and series Not interested. */
+    get: operations["getNotInterestedCapability"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v2/capabilities/password-reset": {
     parameters: {
       query?: never;
@@ -7348,7 +7365,8 @@ export interface paths {
     delete: operations["forgetDevice"];
     options?: never;
     head?: never;
-    patch?: never;
+    /** Update a device's entry for the acting profile, or another household profile, and return it; omitted members are unchanged. Settings and login sessions are untouched. */
+    patch: operations["updateDevice"];
     trace?: never;
   };
   "/api/v2/devices/{device_id}/settings": {
@@ -8966,6 +8984,42 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v2/not-interested": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** List the movies and series the acting profile marked Not interested as catalog cards, newest mark first; items the viewer may not see are omitted. */
+    get: operations["listNotInterested"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v2/not-interested/{item_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Answer whether the acting profile marked the item Not interested: the mark, or 404 when it did not (or the viewer may not see the item). */
+    get: operations["getNotInterested"];
+    /** Mark a movie or series Not interested for the acting profile: its recommendation and discovery rows leave it out and rank similar titles lower, after a rebuild that starts within seconds. Library browsing, search, item detail, playback, favorites and the watchlist are unchanged. Episodes and seasons are refused with 422; mark the series. Marking a marked title succeeds and changes nothing. */
+    put: operations["markNotInterested"];
+    post?: never;
+    /** Clear the acting profile's Not interested mark on the item. An absent mark succeeds and changes nothing. */
+    delete: operations["unmarkNotInterested"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v2/notifications": {
     parameters: {
       query?: never;
@@ -9637,6 +9691,23 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v2/playback/bandwidth-probe": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Download random bytes to measure throughput to this server. Clients time the transfer and send the result as bandwidth_estimate_kbps; the bytes count as transfer egress, not playback. A server runs at most 32 probes at once; an account may run two of them and draw up to 400 MB per 10 minutes. Beyond any limit the request gets 429 with Retry-After. */
+    get: operations["getPlaybackBandwidthProbe"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v2/playback/capabilities": {
     parameters: {
       query?: never;
@@ -10111,7 +10182,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** The server's most played items over the window, minus what the acting profile has watched. */
+    /** The server's most played items over the window, minus what the acting profile has watched or marked Not interested. */
     get: operations["listPopular"];
     put?: never;
     post?: never;
@@ -10128,7 +10199,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Items added over the window, minus what the acting profile has watched. */
+    /** Items added over the window, minus what the acting profile has watched or marked Not interested. */
     get: operations["listRecentlyAdded"];
     put?: never;
     post?: never;
@@ -10179,7 +10250,7 @@ export interface paths {
       path?: never;
       cookie?: never;
     };
-    /** Cards similar to the item by content; not personalised beyond the acting profile's access. */
+    /** Cards similar to the item by content; personalised only by the acting profile's access and by leaving out the titles it marked Not interested. */
     get: operations["listSimilar"];
     put?: never;
     post?: never;
@@ -17142,7 +17213,7 @@ export interface components {
        */
       restart_count: number;
       /**
-       * @description Process state; backoff and failed occur only for resident plugins
+       * @description Process state; starting and backoff occur only for resident plugins, failed also marks a non-resident plugin whose last launch failed
        * @enum {string}
        */
       state: "stopped" | "starting" | "running" | "backoff" | "failed";
@@ -20943,6 +21014,11 @@ export interface components {
       in_watchlist: boolean;
       /** @example false */
       is_favorite: boolean;
+      /**
+       * @description The profile marked the movie or series Not interested: recommendations leave it out and rank similar titles lower
+       * @example false
+       */
+      not_interested: boolean;
       /** @example false */
       played: boolean;
     };
@@ -22410,7 +22486,13 @@ export interface components {
     DeviceSettings: {
       /** Format: int64 */
       changed_count: number;
+      /**
+       * @description Name the profile gave the device; show it in place of device_name. Absent when none was given
+       * @example Living Room
+       */
+      custom_name?: string;
       device_id: string;
+      /** @description Name the device reports for itself */
       device_name: string;
       device_platform: string;
       is_current_device: boolean;
@@ -22431,6 +22513,13 @@ export interface components {
       items: components["schemas"]["DeviceSettings"][];
       /** @description Cursor state; absent for bounded unpaginated collections */
       page?: components["schemas"]["PageInfo"];
+    };
+    DeviceUpdate: {
+      /**
+       * @description Name to show for the device in place of the name it reports. Control characters and bidirectional overrides are removed and runs of spaces collapse; a name with no visible character is rejected. null removes it. The reported device_name is kept
+       * @example Living Room
+       */
+      custom_name?: string | null;
     };
     DiagnosticsCapabilities: {
       accepted_schema_versions: number[];
@@ -26344,6 +26433,36 @@ export interface components {
     NotificationWebPushUnsubscribeInputBody: {
       endpoint: string;
     };
+    NotInterestedCapability: {
+      /** @description Whether the current principal may use the capability */
+      allowed: boolean;
+      /** @description Opaque revision of this document */
+      revision: string;
+      /**
+       * @description Support and configuration state, not health
+       * @enum {string}
+       */
+      state: "available" | "disabled" | "not_configured" | "unsupported";
+    };
+    NotInterestedCollection: {
+      /** @description The page's items; empty, never null */
+      items: components["schemas"]["CatalogItem"][];
+      /** @description Cursor state; absent for bounded unpaginated collections */
+      page?: components["schemas"]["PageInfo"];
+    };
+    NotInterestedEntry: {
+      /**
+       * @description The movie or series
+       * @example movie:heat-1995
+       */
+      item_id: string;
+      /**
+       * Format: date-time
+       * @description When the profile marked it
+       * @example 2026-01-02T03:04:05.000Z
+       */
+      marked_at: string;
+    };
     OAuthCompletion: {
       /**
        * @description Bearer access token
@@ -29629,6 +29748,8 @@ export interface components {
         | components["schemas"]["ServerEndpointPublic"]
         | components["schemas"]["ServerEndpointProvider"]
       )[];
+      /** @description How to reach the API server directly on the local network; absent on a server whose API port does not answer TLS. */
+      local_route?: components["schemas"]["ServerLocalRoute"];
       /** @description Opaque revision of this document */
       revision: string;
       /** @description The same identity getServerIdentity reports */
@@ -29678,6 +29799,18 @@ export interface components {
        * @example 3f2a9d5e-6b1c-4c7e-9a0d-2f4b8c1e7a35
        */
       server_id: string;
+    };
+    ServerLocalRoute: {
+      /**
+       * @description Base64 SHA-256 of the SubjectPublicKeyInfo of the certificate the API listener presents over TLS on its own port. A client accepts a local-network address only when TLS there presents this key, and learns it only over an address it already trusts. Derived from SECRET_KEY, so it changes when that key is rotated.
+       * @example n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=
+       */
+      spki_sha256: string;
+      /**
+       * @description server.local_url: scheme://host[:port] of the API server on the local network, when an admin set one. Clients connect with https on the same host and port, whatever the scheme says, and require the pinned key. Absent when unset; clients may still find local addresses through LAN discovery.
+       * @example http://192.168.1.20:8080
+       */
+      url?: string;
     };
     SettingConstraint: {
       /**
@@ -29771,6 +29904,11 @@ export interface components {
        * @example true
        */
       supports_batched_effective: boolean;
+      /**
+       * @description Whether updateDevice can give a device a custom name, which listDevices returns as custom_name
+       * @example true
+       */
+      supports_device_rename: boolean;
       /**
        * @description Whether repeating a value write converges on the same state
        * @example true
@@ -88914,6 +89052,138 @@ export interface operations {
       };
     };
   };
+  getNotInterestedCapability: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description Optional first precondition, evaluated before If-None-Match: a tag that does not match the current representation is 412 precondition_failed. */
+        "If-Match"?: string;
+        "If-None-Match"?: string;
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          "Cache-Control"?: string;
+          /** @description The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read. */
+          ETag?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["NotInterestedCapability"];
+        };
+      };
+      /** @description The representation named by If-None-Match is current; no body. */
+      304: {
+        headers: {
+          /** @description The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read. */
+          ETag?: string;
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Precondition Failed */
+      412: {
+        headers: {
+          /** @description The strong, opaque validator of the representation; send it back in If-Match on a guarded mutation or If-None-Match on a conditional read. */
+          ETag?: string;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
   getPasswordResetCapability: {
     parameters: {
       query?: never;
@@ -96874,6 +97144,149 @@ export interface operations {
       };
       /** @description Not Acceptable */
       406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  updateDevice: {
+    parameters: {
+      query?: {
+        /** @description Another profile on the account; requires household management authority */
+        profile_id?: string;
+      };
+      header: {
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+        "X-Silo-Device-Id"?: string;
+      };
+      path: {
+        device_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DeviceUpdate"];
+      };
+    };
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["DeviceSettings"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Timeout */
+      408: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Request Entity Too Large */
+      413: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unsupported Media Type */
+      415: {
         headers: {
           [name: string]: unknown;
         };
@@ -111855,6 +112268,442 @@ export interface operations {
       };
     };
   };
+  listNotInterested: {
+    parameters: {
+      query?: {
+        /** @description Opaque cursor from page.next_cursor */
+        cursor?: string;
+        /** @description Artwork variant to presign; absent picks each surface's default */
+        image_size?: "small" | "medium" | "large" | "original";
+        /** @description Page size; default 50, maximum 200 */
+        limit?: number;
+      };
+      header: {
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["NotInterestedCollection"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  getNotInterested: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path: {
+        /** @description Catalog item identifier of a movie or series */
+        item_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OK */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["NotInterestedEntry"];
+        };
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  markNotInterested: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path: {
+        /** @description Catalog item identifier of a movie or series */
+        item_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No Content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  unmarkNotInterested: {
+    parameters: {
+      query?: never;
+      header: {
+        /** @description The household profile acting for this request; it must belong to the authenticated account. */
+        "X-Profile-Id": string;
+        /** @description Verification proof for a PIN-locked profile, issued by POST /api/v2/profiles/{id}/verify-pin; required only when the declared profile is locked */
+        "X-Profile-Token"?: string;
+      };
+      path: {
+        /** @description Catalog item identifier of a movie or series */
+        item_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description No Content */
+      204: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content?: never;
+      };
+      /** @description Bad Request */
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Found */
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Not Acceptable */
+      406: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
   listNotifications: {
     parameters: {
       query?: {
@@ -117334,6 +118183,85 @@ export interface operations {
       };
       /** @description Unsupported Media Type */
       415: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Unprocessable Entity */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Too Many Requests */
+      429: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Internal Server Error */
+      500: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Service Unavailable */
+      503: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+    };
+  };
+  getPlaybackBandwidthProbe: {
+    parameters: {
+      query?: {
+        /** @description Number of bytes to send. A client may close the connection early once it has timed enough of the transfer. */
+        size?: number;
+      };
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Random bytes */
+      200: {
+        headers: {
+          "Cache-Control"?: string;
+          "Content-Length"?: number;
+          [name: string]: unknown;
+        };
+        content: {
+          "application/octet-stream": string;
+        };
+      };
+      /** @description Unauthorized */
+      401: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/problem+json": components["schemas"]["Problem"];
+        };
+      };
+      /** @description Forbidden */
+      403: {
         headers: {
           [name: string]: unknown;
         };

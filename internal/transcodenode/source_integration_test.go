@@ -184,62 +184,7 @@ func TestCoreSourceAccessMatchesLocal(t *testing.T) {
 	})
 
 	// The node's own jobs, each opening its source with the grant.
-	nodeJobs := func(node integrationNode, name string) map[string]string {
-		results := map[string]string{}
-
-		body, _ := json.Marshal(downloadprepare.Request{ArtifactID: "artifact-" + name, SourceGrant: fixtureGrant(node), TargetCodecVideo: "copy", TargetCodecAudio: "copy"})
-		rec := httptest.NewRecorder()
-		node.server.handleDownloadPrepare(rec, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s download prepare = %d %s", name, rec.Code, rec.Body.String())
-		}
-		results["download prepare"] = frameHashes(t, ffmpeg, filepath.Join(node.server.artifactRoot, "artifact-"+name+".mp4"))
-
-		body, _ = json.Marshal(chapterthumbs.RemoteExtractRequest{SourceGrant: fixtureGrant(node), SeekSeconds: 1.5})
-		rec = httptest.NewRecorder()
-		node.server.handleChapterThumbnailExtract(rec, httptest.NewRequest(http.MethodPost, "/chapter-thumbnails/extract", bytes.NewReader(body)))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s chapter frame = %d %s", name, rec.Code, rec.Body.String())
-		}
-		results["chapter frame"] = frameHashes(t, ffmpeg, writeTemp(t, "frame.jpg", rec.Body.Bytes()))
-
-		body, _ = json.Marshal(mediasample.Request{SourceGrant: fixtureGrant(node), Input: fixture,
-			Window: &mediasample.Window{StartSeconds: 1, DurationSeconds: 2},
-			Audio:  &mediasample.AudioOutput{Speech: &mediasample.SpeechParams{}}})
-		rec = postMediaSample(t, node.server, body, true)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s media sample = %d %s", name, rec.Code, rec.Body.String())
-		}
-		results["media sample window"] = rec.Body.String()
-
-		if videoCodec == "libx264" {
-			sessionID := "integration-" + name
-			body, _ = json.Marshal(TranscodeStartRequest{
-				SessionID: sessionID, SourceGrant: fixtureGrant(node), TargetCodecVideo: "copy", TargetCodecAudio: "aac",
-				CopyFMP4RecipeVersion: playback.CopyFMP4RecipeVersion, SegmentDuration: 2, TotalDuration: 4, RequireReady: true,
-			})
-			rec = httptest.NewRecorder()
-			node.server.handleStart(rec, httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(body)))
-			if rec.Code != http.StatusAccepted {
-				t.Fatalf("%s transcode start = %d %s", name, rec.Code, rec.Body.String())
-			}
-			node.server.mu.RLock()
-			session := node.server.sessions[sessionID]
-			node.server.mu.RUnlock()
-			deadline := time.Now().Add(time.Minute)
-			for session.IsRunning() {
-				if time.Now().After(deadline) {
-					t.Fatalf("%s transcode did not finish", name)
-				}
-				time.Sleep(10 * time.Millisecond)
-			}
-			playlist := filepath.Join(node.server.sessionOutputDir(sessionID), "stream.m3u8")
-			results["hls video"] = run(t, ffmpeg, "-v", "error", "-i", playlist, "-map", "0:v", "-f", "framemd5", "-")
-			stopSession(t, node.server, sessionID)
-		}
-		return results
-	}
-	want, got := nodeJobs(local, "local"), nodeJobs(core, "core")
+	want, got := sourceAccessNodeJobs(t, local, ffmpeg, fixture, videoCodec, fileID), sourceAccessNodeJobs(t, core, ffmpeg, fixture, videoCodec, fileID)
 	for job, result := range want {
 		if result == "" || got[job] != result {
 			t.Errorf("%s differs through the relay:\nlocal:\n%.1500s\ncore:\n%.1500s", job, result, got[job])
@@ -248,6 +193,59 @@ func TestCoreSourceAccessMatchesLocal(t *testing.T) {
 	if coreInput.Err() != nil {
 		t.Fatalf("the relayed source failed: %v", coreInput.Err())
 	}
+}
+
+// sourceAccessNodeJobs exercises the node handlers against one source mode.
+func sourceAccessNodeJobs(t *testing.T, node integrationNode, ffmpeg, fixture, videoCodec string, fileID int) map[string]string {
+	t.Helper()
+	name := node.name
+	results := map[string]string{}
+
+	body, _ := json.Marshal(downloadprepare.Request{ArtifactID: "artifact-" + name, SourceGrant: node.grant(t, fileID), TargetCodecVideo: "copy", TargetCodecAudio: "copy"})
+	rec := httptest.NewRecorder()
+	node.server.handleDownloadPrepare(rec, httptest.NewRequest(http.MethodPost, "/downloads/prepare", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s download prepare = %d %s", name, rec.Code, rec.Body.String())
+	}
+	results["download prepare"] = frameHashes(t, ffmpeg, filepath.Join(node.server.artifactRoot, "artifact-"+name+".mp4"))
+
+	body, _ = json.Marshal(chapterthumbs.RemoteExtractRequest{SourceGrant: node.grant(t, fileID), SeekSeconds: 1.5})
+	rec = httptest.NewRecorder()
+	node.server.handleChapterThumbnailExtract(rec, httptest.NewRequest(http.MethodPost, "/chapter-thumbnails/extract", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s chapter frame = %d %s", name, rec.Code, rec.Body.String())
+	}
+	results["chapter frame"] = frameHashes(t, ffmpeg, writeTemp(t, "frame.jpg", rec.Body.Bytes()))
+
+	body, _ = json.Marshal(mediasample.Request{SourceGrant: node.grant(t, fileID), Input: fixture,
+		Window: &mediasample.Window{StartSeconds: 1, DurationSeconds: 2},
+		Audio:  &mediasample.AudioOutput{Speech: &mediasample.SpeechParams{}}})
+	rec = postMediaSample(t, node.server, body, true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%s media sample = %d %s", name, rec.Code, rec.Body.String())
+	}
+	results["media sample window"] = rec.Body.String()
+
+	if videoCodec == "libx264" {
+		sessionID := "integration-" + name
+		body, _ = json.Marshal(TranscodeStartRequest{
+			SessionID: sessionID, SourceGrant: node.grant(t, fileID), TargetCodecVideo: "copy", TargetCodecAudio: "aac",
+			CopyFMP4RecipeVersion: playback.CopyFMP4RecipeVersion, SegmentDuration: 2, TotalDuration: 4, RequireReady: true,
+		})
+		rec = httptest.NewRecorder()
+		node.server.handleStart(rec, httptest.NewRequest(http.MethodPost, "/transcode/start", bytes.NewReader(body)))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("%s transcode start = %d %s", name, rec.Code, rec.Body.String())
+		}
+		node.server.mu.RLock()
+		session := node.server.sessions[sessionID]
+		node.server.mu.RUnlock()
+		waitFinishedWithin(t, session, time.Minute)
+		playlist := filepath.Join(node.server.sessionOutputDir(sessionID), "stream.m3u8")
+		results["hls video"] = run(t, ffmpeg, "-v", "error", "-i", playlist, "-map", "0:v", "-f", "framemd5", "-")
+		stopSession(t, node.server, sessionID)
+	}
+	return results
 }
 
 // frameHashes decodes every stream of input to per-frame MD5s.

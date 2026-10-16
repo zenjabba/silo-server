@@ -180,6 +180,20 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 		return PreparedArtifact{}, errNoPrepareSource
 	}
 	request := downloadprepare.NewRequest(artifactID, opts)
+	node, release, storageRejected := p.reservePrepareNode(ctx, artifactID, request, opts)
+	if node == nil {
+		if storageRejected && !p.LocalFallbackAllowed(ctx) {
+			return PreparedArtifact{}, ErrStorageFull
+		}
+		return p.prepareLocally(ctx, artifactID, source, opts, outputPath)
+	}
+	return p.prepareOnNode(ctx, node, release, keys, request, source, opts, outputPath)
+}
+
+// reservePrepareNode reserves a worker that can execute the requested recipe.
+// storageRejected distinguishes an eligible worker without space from one
+// that cannot execute the recipe at all.
+func (p *NodeAwarePreparer) reservePrepareNode(ctx context.Context, artifactID string, request downloadprepare.Request, opts playback.TranscodeOpts) (*nodepool.Node, func(), bool) {
 	var node *nodepool.Node
 	var release func()
 	// storageRejected records a node turned away only for want of space, so a
@@ -237,13 +251,13 @@ func (p *NodeAwarePreparer) PrepareFile(ctx context.Context, artifactID string, 
 	} else {
 		node, release = p.planner.ReserveTranscodeWork("download-prepare-" + artifactID)
 	}
-	if node == nil {
-		if storageRejected && !p.LocalFallbackAllowed(ctx) {
-			return PreparedArtifact{}, ErrStorageFull
-		}
-		return p.prepareLocally(ctx, artifactID, source, opts, outputPath)
-	}
+	return node, release, storageRejected
+}
 
+// prepareOnNode owns the reservation through dispatch, then validates or
+// recovers the result before deciding whether local fallback is safe.
+func (p *NodeAwarePreparer) prepareOnNode(ctx context.Context, node *nodepool.Node, release func(), keys nodeauth.Keyring, request downloadprepare.Request, source *models.MediaFile, opts playback.TranscodeOpts, outputPath string) (PreparedArtifact, error) {
+	artifactID := request.ArtifactID
 	grant, err := nodesource.GrantFile(ctx, p.sourceGrants, node.ID, source)
 	if err != nil {
 		release()

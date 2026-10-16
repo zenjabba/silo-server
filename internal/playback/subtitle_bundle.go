@@ -155,6 +155,7 @@ func (c *SubtitleCache) OpenSubtitleBundle(ctx context.Context, src SubtitleBund
 			return nil, fmt.Errorf("subtitle bundle: %w", nodesource.ErrSourceChanged)
 		}
 		key := subtitleCacheFormatKey(src.Path, src.Track, info.ModTime(), info.Size(), format)
+		// #nosec G304 -- The cache key contains only a source-path hash, numeric revision/track fields, and a fixed bundle format.
 		if f, err := os.Open(filepath.Join(dir, key)); err == nil {
 			// Recency for LRU eviction, as lookup records it.
 			now := time.Now()
@@ -457,6 +458,7 @@ func validBundleFontName(name string) bool {
 
 // writeBundleFile creates target, which must not exist, with size bytes of r.
 func writeBundleFile(target string, r io.Reader, size int64) error {
+	// #nosec G304 -- unpackSubtitleBundle permits only selected.ass and validated font basenames in its private staging directory; O_EXCL rejects existing entries.
 	f, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -472,6 +474,7 @@ func writeBundleFile(target string, r io.Reader, size int64) error {
 // with its [Script Info] section, after an optional byte order mark and blank
 // space.
 func checkASSScript(path string) error {
+	// #nosec G304 -- Internal caller supplies its CreateTemp script or the fixed selected.ass path in a validated private staging directory.
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -489,6 +492,7 @@ func checkASSScript(path string) error {
 // boundedRun runs bin, copying its stdout to w, and fails when the process
 // fails or writes more than maxBytes.
 func boundedRun(ctx context.Context, bin string, args []string, w io.Writer, maxBytes int64) error {
+	// #nosec G204 -- Internal bundle extraction supplies configured/discovered FFmpeg and fixed argv; the catalog source is -i data and output is stdout.
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.WaitDelay = 5 * time.Second
 	stderr := newBoundedTailBuffer(stderrTailMaxBytes)

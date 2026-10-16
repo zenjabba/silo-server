@@ -122,26 +122,7 @@ func TestAdminNodeKeyIssueThroughTheNodeStore(t *testing.T) {
 	deps.AdminNodesRead = nodes
 	h := NewHandler(deps)
 
-	keyIssued := func() bool {
-		t.Helper()
-		rec := do(t, h, "GET", Prefix+"/admin/nodes?limit=200", "", bearer(adminToken))
-		var page struct {
-			Items []struct {
-				ID        ID   `json:"id"`
-				KeyIssued bool `json:"key_issued"`
-			} `json:"items"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil || rec.Code != http.StatusOK {
-			t.Fatal(rec.Code, rec.Body.String(), err)
-		}
-		for _, item := range page.Items {
-			if item.ID == IDFromInt(int64(transcode.ID)) {
-				return item.KeyIssued
-			}
-		}
-		t.Fatal("test node missing from the first page of nodes")
-		return false
-	}
+	keyIssued := func() bool { return adminNodeKeyIssued(t, h, transcode.ID) }
 	if keyIssued() {
 		t.Fatal("a new node reports key_issued")
 	}
@@ -190,4 +171,25 @@ func TestAdminNodeKeyIssueThroughTheNodeStore(t *testing.T) {
 
 	requireProblem(t, do(t, h, "POST", fmt.Sprintf("%s/admin/nodes/%d/key", Prefix, proxy.ID), "", bearer(adminToken)), TypeConflict)
 	requireProblem(t, do(t, h, "POST", Prefix+"/admin/nodes/2000000000/key", "", bearer(adminToken)), TypeNotFound)
+}
+
+func adminNodeKeyIssued(t *testing.T, h http.Handler, nodeID int) bool {
+	t.Helper()
+	rec := do(t, h, "GET", Prefix+"/admin/nodes?limit=200", "", bearer(adminToken))
+	var page struct {
+		Items []struct {
+			ID        ID   `json:"id"`
+			KeyIssued bool `json:"key_issued"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil || rec.Code != http.StatusOK {
+		t.Fatal(rec.Code, rec.Body.String(), err)
+	}
+	for _, item := range page.Items {
+		if item.ID == IDFromInt(int64(nodeID)) {
+			return item.KeyIssued
+		}
+	}
+	t.Fatal("test node missing from the first page of nodes")
+	return false
 }

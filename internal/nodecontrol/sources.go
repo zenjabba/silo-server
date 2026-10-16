@@ -82,13 +82,15 @@ func (s *Server) HandleSourceOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(nodesource.OpenResponse{
+	if err := json.NewEncoder(w).Encode(nodesource.OpenResponse{
 		Grant: renewed,
 		Path:  claims.Path,
 		Size:  claims.Size,
 		Mtime: claims.Mtime,
 		ETag:  claims.ETag(),
-	})
+	}); err != nil {
+		slog.ErrorContext(r.Context(), "write source open response", "component", "nodecontrol", "node_id", id, "error", err)
+	}
 }
 
 // catalogStatus is 0 when the catalog still has the source claims name at

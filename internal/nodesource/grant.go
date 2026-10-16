@@ -229,10 +229,7 @@ func (g *Grants) sign(claims Grant) (string, error) {
 		return "", err
 	}
 	claims.Exp = g.now().Add(g.lifetime).Unix()
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		return "", err
-	}
+	payload, _ := json.Marshal(claims) // Grant contains only strings and integers.
 	token := base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(grantMAC(key, payload))
 	// Verify refuses anything longer, so never hand out a grant that could
 	// not be presented back.

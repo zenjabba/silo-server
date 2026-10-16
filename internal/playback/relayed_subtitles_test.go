@@ -167,12 +167,16 @@ func (c *fakeBundleCore) relayed(t *testing.T, path string) *nodesource.Handle {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
 	for !cond() {
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatal("condition never held")
+		case <-ticker.C:
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -452,8 +456,12 @@ func TestClosingAPreparingSessionCancelsItsLaunch(t *testing.T) {
 	if fetching := goroutinesNamed("fetchSubtitleBundle"); fetching != 0 {
 		t.Fatalf("%d fetches outlive their session", fetching)
 	}
+	if !session.subtitle.ended() {
+		t.Fatal("Close returned with the subtitle staging alive")
+	}
+	// Both the launch and staging have ended, so releasing the core cannot
+	// create a later FFmpeg process.
 	close(core.release)
-	time.Sleep(50 * time.Millisecond)
 	if got := ffmpegRuns(t, runs); len(got) != 0 {
 		t.Fatalf("a closed session started ffmpeg: %q", got)
 	}
@@ -552,15 +560,16 @@ func goroutinesNamed(fn string) int {
 // an earlier session reusing the output directory would.
 func writeOldGeneration(t *testing.T, dir string) {
 	t.Helper()
-	manifest := "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"
+	var manifest strings.Builder
+	manifest.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n")
 	for i := range 4 {
 		name := fmt.Sprintf("seg_%05d.ts", i)
-		manifest += "#EXTINF:2.000000,\n" + name + "\n"
+		manifest.WriteString("#EXTINF:2.000000,\n" + name + "\n")
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("old segment"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "stream.m3u8"), []byte(manifest), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "stream.m3u8"), []byte(manifest.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -672,5 +681,7 @@ func TestReadinessWaitsForTheStagingWithinTheRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a start whose staging outlasts FFmpeg's readiness wait = %v", err)
 	}
-	defer func() { _ = session.Close() }()
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

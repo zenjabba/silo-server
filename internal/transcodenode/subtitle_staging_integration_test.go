@@ -118,13 +118,19 @@ func liveSession(node integrationNode, id string) *playback.TranscodeSession {
 // waitFinished waits for session's FFmpeg to finish.
 func waitFinished(t *testing.T, session *playback.TranscodeSession) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Minute)
-	for session.IsRunning() {
-		if time.Now().After(deadline) {
-			t.Fatal("the session never finished")
-		}
-		time.Sleep(10 * time.Millisecond)
+	waitFinishedWithin(t, session, 2*time.Minute)
+}
+
+func waitFinishedWithin(t *testing.T, session *playback.TranscodeSession, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
+	defer cancel()
+	select {
+	case <-session.Done():
+	case <-ctx.Done():
+		t.Fatal("the session never finished")
 	}
+
 	if err := session.WaitError(); err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -243,13 +249,15 @@ func TestCoreSourceStopDuringStagingCancelsTheLaunch(t *testing.T) {
 	if session.IsRunning() || !errors.Is(session.WaitError(), context.Canceled) {
 		t.Fatalf("stopped session: running %t, %v", session.IsRunning(), session.WaitError())
 	}
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 	deadline := time.Now().Add(10 * time.Second)
 	for goroutinesIn("launchWhenStaged")+goroutinesIn("fetchSubtitleBundle")+goroutinesIn("renewLoop") != 0 {
 		if time.Now().After(deadline) {
 			t.Fatalf("after the stop: %d launches, %d fetches, %d source handles", goroutinesIn("launchWhenStaged"),
 				goroutinesIn("fetchSubtitleBundle"), goroutinesIn("renewLoop"))
 		}
-		time.Sleep(10 * time.Millisecond)
+		<-poll.C
 	}
 	if _, err := os.Stat(core.server.sessionOutputDir("stopped")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the stopped session's output exists: %v", err)
