@@ -2291,7 +2291,8 @@ the handshake is served on this process, the protocol (`silo.admin-logs.v2`) and
 selections (`app`, `audit`). `POST /api/v2/admin/logs/ws-ticket` (`createAdminLogsSocketTicket`)
 delegates the acting administrator's current access-token login session for one connection.
 API keys and credentials without a bounded expiry cannot mint; a login whose effective role is
-not administrator (a secondary profile on an administrator account) is refused with 403. The
+not administrator (a secondary profile on an administrator account, or a profile-less session
+on a household with a PIN-protected or access-limited profile) is refused with 403. The
 ticket is opaque, single-use, expires within 30 seconds and binds the account, login session,
 role, profile proof and resolved access scope. The response carries `ticket`, `expires_in`,
 `max_connection_seconds` (300) and `protocol`, is not cached, and minting is naturally
@@ -2309,7 +2310,8 @@ proof and administrator role are validated again before 101.
 
 The connection ends at the earlier of five minutes or access-token expiry, and the handler
 rechecks session, account, profile and administrator role every 15 seconds with a two-second
-bound; a failed check or a demotion closes the socket. Reconnect with a newly minted credential;
+bound; a failed check or a demotion closes the socket, including once the household of a
+profile-less session gains a PIN-protected or access-limited profile. Reconnect with a newly minted credential;
 this is bounded revocation detection, not instantaneous. Without Redis the ticket is
 process-local and requires affinity to the minting node.
 
