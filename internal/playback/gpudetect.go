@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
+	"github.com/Silo-Server/silo-server/internal/encodinglimit"
 	"github.com/Silo-Server/silo-server/internal/nodemetrics"
 	"github.com/Silo-Server/silo-server/internal/procgroup"
 	"github.com/Silo-Server/silo-server/internal/tonemap"
@@ -64,6 +65,7 @@ var (
 // hardwareProbeResult records a VideoToolbox probe, which reports per-codec
 // availability because macOS can offer H.264 without HEVC on older hardware.
 type hardwareProbeResult struct {
+	transient     bool
 	available     bool
 	reason        string
 	h264Available bool
@@ -76,6 +78,7 @@ type hardwareProbeResult struct {
 // It covers every backend the Linux walk probes, not just NVENC, which is why
 // it is not named for one of them.
 type hwProbeResult struct {
+	transient bool
 	available bool
 	reason    string
 }
@@ -110,7 +113,8 @@ var hwProbeCache = struct {
 // DetectedBackend reports one hardware backend that has candidate devices on
 // this host, together with the outcome of its FFmpeg verification probe.
 type DetectedBackend struct {
-	Backend string `json:"backend"`
+	capacityLimited bool   // temporary admission failure; never a GPU verdict
+	Backend         string `json:"backend"`
 	// Verified reports whether at least one candidate device passed its probe.
 	Verified bool `json:"verified"`
 	// Devices lists every candidate considered for this backend, in probe order.
@@ -274,11 +278,13 @@ func DetectHWAccelWithFFmpegContextResult(ctx context.Context, hwAccel, ffmpegPa
 		// for software tone mapping, with an operator re-probe that cannot
 		// verify otherwise because there is nothing here to verify.
 		entry := DetectedBackend{Backend: transcodeHWVideoToolbox}
-		if ok, reason := ffmpegSupportsVideoToolboxContext(ctx, ffmpegPath); ok {
+		result := cachedVideoToolboxProbeContext(ctx, ffmpegPath)
+		entry.capacityLimited = result.transient
+		if result.available {
 			entry.Verified = true
 			resolved = transcodeHWVideoToolbox
 		} else {
-			entry.Reason = reason
+			entry.Reason = result.reason
 			// A probe cut short by the caller's deadline is not a verdict about
 			// the hardware, and must not be hashed as one.
 			complete = ctx.Err() == nil
@@ -297,6 +303,11 @@ func DetectHWAccelWithFFmpegContextResult(ctx context.Context, hwAccel, ffmpegPa
 		BootID:              detectBootID(),
 		NVIDIAGPUUUIDs:      nvidiaGPUUUIDList(),
 		Source:              "local",
+	}
+	for _, backend := range detected {
+		if backend.capacityLimited {
+			return info, encodinglimit.ErrAtCapacity
+		}
 	}
 	if !complete {
 		return info, ErrHardwareDetectionIncomplete
@@ -335,27 +346,46 @@ func ResolveHWAccelWithFFmpeg(hwAccel, ffmpegPath, hwDevice string) string {
 // FFmpeg capability probe to outlive ctx. A coalesced probe may continue for
 // other callers and cache its bounded result after this caller leaves.
 func ResolveHWAccelWithFFmpegContext(ctx context.Context, hwAccel, ffmpegPath, hwDevice string) string {
+	resolved, _ := ResolveHWAccelWithFFmpegContextResult(ctx, hwAccel, ffmpegPath, hwDevice)
+	return resolved
+}
+
+// ResolveHWAccelWithFFmpegContextResult preserves temporary probe failures so
+// callers can avoid caching them as a decision to use software.
+func ResolveHWAccelWithFFmpegContextResult(ctx context.Context, hwAccel, ffmpegPath, hwDevice string) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if hwAccel != hwAccelAuto {
-		return hwAccel
+		return hwAccel, nil
 	}
 	if currentGOOS == darwinGOOS {
-		if ok, reason := ffmpegSupportsVideoToolboxContext(ctx, ffmpegPath); ok {
+		result := cachedVideoToolboxProbeContext(ctx, ffmpegPath)
+		if result.transient {
+			return transcodeHWNone, encodinglimit.ErrAtCapacity
+		}
+		if result.available {
 			slog.InfoContext(ctx, "hw_accel=auto: macOS detected, using VideoToolbox")
-			return transcodeHWVideoToolbox
+			return transcodeHWVideoToolbox, nil
 		} else {
 			slog.WarnContext(ctx, "hw_accel=auto: macOS detected but FFmpeg VideoToolbox probe failed",
-				"ffmpeg", normalizeFFmpegPath(ffmpegPath), "reason", reason)
+				"ffmpeg", normalizeFFmpegPath(ffmpegPath), "reason", result.reason)
 		}
-		return transcodeHWNone
+		return transcodeHWNone, ctx.Err()
 	}
 	if currentGOOS != linuxGOOS {
-		return HWAccelNone
+		return HWAccelNone, nil
 	}
-	resolved, _, _ := walkHWAccelBackends(ctx, ffmpegPath, collectHWCandidates(hwDevice), true)
-	return resolved
+	resolved, detected, complete := walkHWAccelBackends(ctx, ffmpegPath, collectHWCandidates(hwDevice), true)
+	for _, backend := range detected {
+		if backend.capacityLimited {
+			return resolved, encodinglimit.ErrAtCapacity
+		}
+	}
+	if !complete {
+		return resolved, ErrHardwareDetectionIncomplete
+	}
+	return resolved, nil
 }
 
 // hwAccelAuto is the configured hw_accel value that asks this package to pick
@@ -796,7 +826,14 @@ func verifyHWAccelBackend(ctx context.Context, backend, ffmpegPath string, candi
 			continue
 		}
 		probed = true
-		available, reason := ffmpegSupportsBackendContext(ctx, backend, ffmpegPath, device)
+		probe, _ := hwBackendProbeFor(backend)
+		result := cachedHardwareProbeResultContext(ctx, backend, ffmpegPath, device, probe)
+		available, reason := result.available, result.reason
+		if result.transient {
+			entry.capacityLimited = true
+			entry.Reason = reason
+			return entry, false
+		}
 		if !available && ctx.Err() != nil {
 			// The walk's own budget ran out while this probe was in flight, so
 			// the failure describes the deadline and not the hardware. Checking
@@ -1031,6 +1068,11 @@ func ffmpegSupportsBackendContext(ctx context.Context, backend, ffmpegPath, devi
 }
 
 func cachedHardwareProbeContext(ctx context.Context, backend, ffmpegPath, device string, probe hwBackendProbe) (bool, string) {
+	result := cachedHardwareProbeResultContext(ctx, backend, ffmpegPath, device, probe)
+	return result.available, result.reason
+}
+
+func cachedHardwareProbeResultContext(ctx context.Context, backend, ffmpegPath, device string, probe hwBackendProbe) hwProbeResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1048,7 +1090,7 @@ func cachedHardwareProbeContext(ctx context.Context, backend, ffmpegPath, device
 	cacheKey := hwProbeCacheKey(hwProbeCache.generation, ffmpegPath, backend, device)
 	if entry, ok := hwProbeCache.entries[cacheKey]; ok && hwProbeCacheEntryCurrent(entry, now()) {
 		hwProbeCache.Unlock()
-		return entry.result.available, entry.result.reason
+		return entry.result
 	}
 	hwProbeCache.Unlock()
 
@@ -1081,7 +1123,9 @@ func cachedHardwareProbeContext(ctx context.Context, backend, ffmpegPath, device
 			entry.expiresAt = now().Add(negativeTTL)
 		}
 		hwProbeCache.Lock()
-		hwProbeCache.entries[cacheKey] = entry
+		if !result.transient {
+			hwProbeCache.entries[cacheKey] = entry
+		}
 		hwProbeCache.Unlock()
 		return result, nil
 	})
@@ -1095,17 +1139,17 @@ func cachedHardwareProbeContext(ctx context.Context, backend, ffmpegPath, device
 			<-resultCh
 			hwProbesInFlight.Add(-1)
 		}()
-		return false, ctx.Err().Error()
+		return hwProbeResult{reason: ctx.Err().Error()}
 	case shared := <-resultCh:
 		hwProbesInFlight.Add(-1)
 		if shared.Err != nil {
-			return false, shared.Err.Error()
+			return hwProbeResult{reason: shared.Err.Error()}
 		}
 		result, ok := shared.Val.(hwProbeResult)
 		if !ok {
-			return false, "invalid shared hardware probe result"
+			return hwProbeResult{reason: "invalid shared hardware probe result"}
 		}
-		return result.available, result.reason
+		return result
 	}
 }
 
@@ -1289,7 +1333,9 @@ func cachedVideoToolboxProbeContext(ctx context.Context, ffmpegPath string) hard
 			entry.expiresAt = time.Now().Add(retryDelay)
 		}
 		videoToolboxProbes.Lock()
-		videoToolboxProbes.byPath[cacheKey] = entry
+		if !result.transient {
+			videoToolboxProbes.byPath[cacheKey] = entry
+		}
 		call.result = result
 		delete(videoToolboxProbes.inFlight, cacheKey)
 		close(call.done)
@@ -1356,14 +1402,14 @@ func probeExecFFmpegPath(ffmpegPath string) string {
 // filter graph applies (see appendHWAccelArgs).
 func probeFFmpegVideoToolboxContext(ctx context.Context, ffmpegPath string, commandTimeout time.Duration) hardwareProbeResult {
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-hwaccels"); err != nil {
-		return hardwareProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hardwareProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	} else if !ffmpegOutputHasToken(output, "videotoolbox") {
 		return hardwareProbeResult{reason: "videotoolbox hwaccel unavailable"}
 	}
 
 	output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders")
 	if err != nil {
-		return hardwareProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hardwareProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	}
 	if !ffmpegOutputHasToken(output, "h264_videotoolbox") {
 		return hardwareProbeResult{reason: "h264_videotoolbox encoder unavailable"}
@@ -1392,7 +1438,7 @@ func probeFFmpegVideoToolboxContext(ctx context.Context, ffmpegPath string, comm
 
 	h264Output, err := smoke("h264_videotoolbox")
 	if err != nil {
-		return hardwareProbeResult{reason: "h264_videotoolbox smoke encode failed: " + FormatFFmpegProbeFailure(err, h264Output)}
+		return hardwareProbeResult{reason: "h264_videotoolbox smoke encode failed: " + FormatFFmpegProbeFailure(err, h264Output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	}
 
 	result := hardwareProbeResult{available: true, h264Available: true}
@@ -1402,6 +1448,7 @@ func probeFFmpegVideoToolboxContext(ctx context.Context, ffmpegPath string, comm
 		result.hevcAvailable = hevcErr == nil
 		if hevcErr != nil {
 			result.reason = "hevc_videotoolbox smoke encode failed: " + FormatFFmpegProbeFailure(hevcErr, hevcOutput)
+			result.transient = errors.Is(hevcErr, encodinglimit.ErrAtCapacity)
 		}
 	}
 	return result
@@ -1423,13 +1470,13 @@ func normalizeFFmpegPath(ffmpegPath string) string {
 // candidate device path is not part of the command line.
 func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath, device string, commandTimeout time.Duration) hwProbeResult {
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-hwaccels"); err != nil {
-		return hwProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hwProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	} else if !ffmpegOutputHasToken(output, "cuda") {
 		return hwProbeResult{reason: "cuda hwaccel unavailable"}
 	}
 
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
-		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	} else if !ffmpegOutputHasToken(output, encoderH264NVENC) {
 		return hwProbeResult{reason: encoderUnavailableReason(encoderH264NVENC)}
 	} else if !ffmpegOutputHasToken(output, "hevc_nvenc") {
@@ -1437,7 +1484,7 @@ func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath, device string, com
 	}
 
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-filters"); err != nil {
-		return hwProbeResult{reason: "filters probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hwProbeResult{reason: "filters probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	} else if !ffmpegOutputHasToken(output, "scale_cuda") {
 		return hwProbeResult{reason: "scale_cuda filter unavailable"}
 	} else if !ffmpegOutputHasToken(output, "hwupload_cuda") {
@@ -1452,13 +1499,13 @@ func probeFFmpegNVENCContext(ctx context.Context, ffmpegPath, device string, com
 // initializes a VAAPI display and derives the QSV device from it.
 func probeFFmpegQSVContext(ctx context.Context, ffmpegPath, device string, commandTimeout time.Duration) hwProbeResult {
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-hwaccels"); err != nil {
-		return hwProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hwProbeResult{reason: "hwaccels probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	} else if !ffmpegOutputHasToken(output, transcodeHWQSV) && !ffmpegOutputHasToken(output, transcodeHWVAAPI) {
 		return hwProbeResult{reason: "qsv and vaapi hwaccels unavailable"}
 	}
 
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
-		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	} else if !ffmpegOutputHasToken(output, encoderH264QSV) {
 		return hwProbeResult{reason: encoderUnavailableReason(encoderH264QSV)}
 	} else if !ffmpegOutputHasToken(output, "hevc_qsv") {
@@ -1473,7 +1520,7 @@ func probeFFmpegQSVContext(ctx context.Context, ffmpegPath, device string, comma
 // stays narrower than QSV's.
 func probeFFmpegVAAPIContext(ctx context.Context, ffmpegPath, device string, commandTimeout time.Duration) hwProbeResult {
 	if output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, "-hide_banner", "-encoders"); err != nil {
-		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hwProbeResult{reason: "encoders probe failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	} else if !ffmpegOutputHasToken(output, encoderH264VAAPI) {
 		return hwProbeResult{reason: encoderUnavailableReason(encoderH264VAAPI)}
 	}
@@ -1486,7 +1533,7 @@ func probeFFmpegVAAPIContext(ctx context.Context, ffmpegPath, device string, com
 func smokeEncodeResult(ctx context.Context, ffmpegPath, backend, device string, commandTimeout time.Duration) hwProbeResult {
 	output, err := runFFmpegProbe(ctx, commandTimeout, ffmpegPath, hardwareSmokeEncodeArgs(backend, device)...)
 	if err != nil {
-		return hwProbeResult{reason: hardwareEncoder(backend) + " smoke encode failed: " + FormatFFmpegProbeFailure(err, output)}
+		return hwProbeResult{reason: hardwareEncoder(backend) + " smoke encode failed: " + FormatFFmpegProbeFailure(err, output), transient: errors.Is(err, encodinglimit.ErrAtCapacity)}
 	}
 	return hwProbeResult{available: true}
 }
@@ -1522,7 +1569,7 @@ func runFFmpegProbe(ctx context.Context, timeout time.Duration, ffmpegPath strin
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return procgroup.CommandContext(ctx, ffmpegPath, args...).CombinedOutput()
+	return encodinglimit.CombinedOutput(procgroup.CommandContext(ctx, ffmpegPath, args...))
 }
 
 func ffmpegOutputHasToken(output []byte, token string) bool {
