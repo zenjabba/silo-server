@@ -51,6 +51,7 @@ import {
   type WorkerToWorkletMessage,
   type WorkletToWorkerMessage,
 } from "./protocol";
+import { READ_AHEAD_LIMITS, ReadAhead, readAheadCacheBytes } from "./readAhead";
 import { redactStreamUrls, type EngineSourceSpec } from "./source";
 import { copyPlanes, planePool, RAW_PLANE_FORMATS } from "./planeCopy";
 import { videoStarts, type VideoStart } from "./videoStart";
@@ -68,7 +69,8 @@ const AUDIO_AHEAD_SECONDS = 1.5;
  * excess is trimmed.
  */
 const FFMPEG_PREROLL_SECONDS = 0.5;
-const URL_CACHE_BYTES = 96 * 1024 * 1024;
+/** The read cache until the file's duration sizes it (see ReadAhead.setDuration). */
+const URL_CACHE_BYTES = readAheadCacheBytes(READ_AHEAD_LIMITS.minWindowBytes);
 /** How long a read's newest data may wait before the page hears of it. */
 const MEDIA_DATA_REPORT_MS = 250;
 /** Audio sent to the worklet before the page may report the position playable. */
@@ -214,20 +216,21 @@ async function serverAudioCodec(track: InputAudioTrack): Promise<string> {
 
 async function open(spec: EngineSourceSpec): Promise<void> {
   source = spec;
-  input = new Input({
-    formats: ALL_FORMATS,
-    source: new UrlSource(spec.url, {
-      requestInit: { headers: spec.headers },
-      maxCacheSize: URL_CACHE_BYTES,
-      fetchFn: meteredFetch,
-      getRetryDelay: (attempts) => {
-        // A failed read is the transport failing; the page treats it as an
-        // outage rather than a slow link.
-        post({ type: "read-failed" });
-        return attempts < 4 ? Math.min(4, 0.5 * 2 ** attempts) : null;
-      },
-    }),
+  const readAhead = new ReadAhead(meteredFetch);
+  const urlSource = new UrlSource(spec.url, {
+    requestInit: { headers: spec.headers },
+    maxCacheSize: URL_CACHE_BYTES,
+    fetchFn: readAhead.fetch,
+    getRetryDelay: (attempts) => {
+      // A failed read is the transport failing; the page treats it as an
+      // outage rather than a slow link.
+      post({ type: "read-failed" });
+      return attempts < 4 ? Math.min(4, 0.5 * 2 ** attempts) : null;
+    },
   });
+  // Without the internals it needs, the source reads as Mediabunny built it.
+  readAhead.attach(urlSource);
+  input = new Input({ formats: ALL_FORMATS, source: urlSource });
   try {
     videoTrack = await input.getPrimaryVideoTrack();
   } catch (error) {
@@ -299,6 +302,7 @@ async function open(spec: EngineSourceSpec): Promise<void> {
 
   let duration = spec.durationSeconds ?? 0;
   if (!(duration > 0)) duration = (await input.computeDuration()) - timelineOrigin;
+  readAhead.setDuration(duration);
 
   post({
     type: "ready",

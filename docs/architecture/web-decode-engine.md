@@ -105,6 +105,19 @@ VideoPlayer (page)
   they arrive; otherwise fast playback would outrun the credits. A seek starts
   a new generation; every message carries one, and stale ones are dropped
   wherever they land.
+- **Reading.** Mediabunny's `UrlSource` reads the file over HTTP ranges, and
+  `engine/readAhead.ts` decides how far ahead and in what pieces. Once a read
+  worker has read 4 MiB in order, it keeps up to 45 s of the file, at its
+  average bitrate, ahead of the demuxer, within 32–128 MiB, and refills it a
+  16 MiB step at a time. Workers reading tracks stored apart share the
+  window. The read cache holds that window, one step, and 48 MiB behind the
+  demuxer. Each request is bounded (`bytes=N-M`) to its worker's
+  target, so it ends on its own rather than being aborted. Until a response
+  has stated the file's size, a bounded 206 without a readable
+  `Content-Range` is asked for again without an end, because `UrlSource`
+  would take its end as the end of the file. This reaches into `UrlSource`
+  internals, so `mediabunny` is pinned to an exact version and
+  `readAhead.test.ts` drives the installed one.
 - **Audio.** The AudioContext opens at the track's sample rate. Surround
   passes through when `destination.maxChannelCount` allows it; otherwise the
   worker downmixes with ATSC A/52 Lo/Ro coefficients and soft-limits
