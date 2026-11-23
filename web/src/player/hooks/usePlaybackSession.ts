@@ -703,7 +703,7 @@ export function usePlaybackSession(
     /** The subtitle inventory the queued request's subtitle ordinal indexes. */
     subtitleInventory: readonly SubtitleInventoryItemV3[];
     onAdopt?: (planRevision: number) => void;
-    reconnectWhenSessionGone: boolean;
+    reconnectOnRequestFailure: boolean;
   } | null>(null);
   const issueReplanRef = useRef<
     (
@@ -711,7 +711,7 @@ export function usePlaybackSession(
       retireSessionOnRefusal?: boolean,
       reconnect?: boolean,
       onAdopt?: (planRevision: number) => void,
-      reconnectWhenSessionGone?: boolean,
+      reconnectOnRequestFailure?: boolean,
     ) => Promise<boolean>
   >(async () => false);
   const qualityRef = useRef(normalizeQualityPreferenceV3(qualityPreference));
@@ -1415,7 +1415,7 @@ export function usePlaybackSession(
       // goes back to the reconnect, which starts a new session for any answer
       // that is not a plan, instead of showing an error. The stream showed a
       // frame, so this holds even when it never played.
-      reconnectWhenSessionGone = false,
+      reconnectOnRequestFailure = false,
     ): Promise<boolean> {
       const plan = planRef.current;
       const sessionId = sessionIdRef.current;
@@ -1475,7 +1475,7 @@ export function usePlaybackSession(
               mediaFileId: plan.effective_media_file_id,
               subtitleInventory: plan.subtitle.inventory,
               onAdopt,
-              reconnectWhenSessionGone,
+              reconnectOnRequestFailure,
             };
           });
         }
@@ -1628,7 +1628,7 @@ export function usePlaybackSession(
         }
         if (
           isFailureRecovery &&
-          (reconnectWhenSessionGone ||
+          (reconnectOnRequestFailure ||
             (playbackStartedRef.current && isRetryableReconnectError(err, "replan")))
         ) {
           // The stream broke and the server could not be reached to replace
@@ -1710,7 +1710,7 @@ export function usePlaybackSession(
                 pendingReplan.retireSessionOnRefusal,
                 false,
                 pendingReplan.onAdopt,
-                pendingReplan.reconnectWhenSessionGone,
+                pendingReplan.reconnectOnRequestFailure,
               )
               .then(pendingReplan.resolve);
           }
@@ -1885,7 +1885,7 @@ export function usePlaybackSession(
   );
 
   const recoverFromFailure = useCallback(
-    (failure: FailureV3, currentPosition: number, reconnectWhenSessionGone = false) => {
+    (failure: FailureV3, currentPosition: number, reconnectOnRequestFailure = false) => {
       // While the server is unreachable a transport failure says nothing about
       // the route; the reconnect replaces the transport anyway.
       if (reconnectRef.current.active) return;
@@ -1898,7 +1898,7 @@ export function usePlaybackSession(
         false,
         false,
         undefined,
-        reconnectWhenSessionGone,
+        reconnectOnRequestFailure,
       );
     },
     [replan, reportEvent],
